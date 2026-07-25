@@ -49,6 +49,174 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
 
+    // ── 1_triangle example executable ─────────────────────
+    const exe_1_triangle = b.addExecutable(.{
+        .name = "1_triangle",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/1_triangle/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = mod },
+                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+            },
+        }),
+    });
+    exe_1_triangle.root_module.linkLibrary(lib);
+
+    b.installArtifact(exe_1_triangle);
+
+    const run_1_triangle_step = b.step("1_triangle", "Run 1_triangle example");
+    const run_1_triangle_cmd = b.addRunArtifact(exe_1_triangle);
+    run_1_triangle_step.dependOn(&run_1_triangle_cmd.step);
+    run_1_triangle_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_1_triangle_cmd.addArgs(args);
+
+    // ── 2_textures example ────────────────────────────────
+    const tex_exe = b.addExecutable(.{
+        .name = "2_textures",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/2_textures/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = mod },
+                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+            },
+        }),
+    });
+    tex_exe.root_module.linkLibrary(lib);
+
+    b.installArtifact(tex_exe);
+
+    const tex_run_step = b.step("2_textures", "Run 2_textures example");
+    const tex_run_cmd = b.addRunArtifact(tex_exe);
+    tex_run_step.dependOn(&tex_run_cmd.step);
+    tex_run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| tex_run_cmd.addArgs(args);
+
+    // ── 3_3D example executable ──────────────────────────
+    const exe_3d = b.addExecutable(.{
+        .name = "3_3D",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/3_3D/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = mod },
+                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+            },
+        }),
+    });
+    exe_3d.root_module.linkLibrary(lib);
+
+    b.installArtifact(exe_3d);
+
+    const run_3d_step = b.step("3_3D", "Run 3_3D example");
+    const run_3d_cmd = b.addRunArtifact(exe_3d);
+    run_3d_step.dependOn(&run_3d_cmd.step);
+    run_3d_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_3d_cmd.addArgs(args);
+
+    // ── 5_indirect_triangles example ──────────────────────
+    const exe_5 = b.addExecutable(.{
+        .name = "5_indirect_triangles",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/5_indirect_triangles/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = mod },
+                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+            },
+        }),
+    });
+    exe_5.root_module.linkLibrary(lib);
+
+    b.installArtifact(exe_5);
+
+    const run_step_5 = b.step("5_indirect_triangles", "Run 5_indirect_triangles example");
+    const run_cmd_5 = b.addRunArtifact(exe_5);
+    run_step_5.dependOn(&run_cmd_5.step);
+    run_cmd_5.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_cmd_5.addArgs(args);
+
+    // ── 4_textures_advanced example ────────────────────────
+    const tex_adv_exe = b.addExecutable(.{
+        .name = "4_textures_advanced",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/4_textures_advanced/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = mod },
+                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+            },
+        }),
+    });
+    tex_adv_exe.root_module.linkLibrary(lib);
+
+    b.installArtifact(tex_adv_exe);
+
+    const tex_adv_run_step = b.step("4_textures_advanced", "Run 4_textures_advanced example");
+    const tex_adv_run_cmd = b.addRunArtifact(tex_adv_exe);
+    tex_adv_run_step.dependOn(&tex_adv_run_cmd.step);
+    tex_adv_run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| tex_adv_run_cmd.addArgs(args);
+
+    // ── 6_compute_shaders example ─────────────────────────
+    const exe6 = b.addExecutable(.{
+        .name = "6_compute_shaders",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/6_compute_shaders/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = mod },
+                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+            },
+        }),
+    });
+    exe6.root_module.linkLibrary(lib);
+
+    b.installArtifact(exe6);
+
+    const run_step6 = b.step("6_compute_shaders", "Run 6_compute_shaders example");
+    const run_cmd6 = b.addRunArtifact(exe6);
+    run_step6.dependOn(&run_cmd6.step);
+    run_cmd6.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_cmd6.addArgs(args);
+
+    // ── 7_deferred_async_load example ──────────────────────
+    const exe_7 = b.addExecutable(.{
+        .name = "7_deferred_async_load",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/7_deferred_async_load/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = mod },
+                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+            },
+        }),
+    });
+    exe_7.root_module.linkLibrary(lib);
+
+    b.installArtifact(exe_7);
+
+    const run_7_step = b.step("7_deferred_async_load", "Run 7_deferred_async_load example");
+    const run_7_cmd = b.addRunArtifact(exe_7);
+    run_7_step.dependOn(&run_7_cmd.step);
+    run_7_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_7_cmd.addArgs(args);
+
     // ── Tests ─────────────────────────────────────────────
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);

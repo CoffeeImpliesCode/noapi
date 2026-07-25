@@ -9,9 +9,10 @@ pub const TextureFormat = enum(u8) {
     default, r8_unorm, rg8_unorm, rgba8_unorm, abgr8_unorm, bgra8_unorm,
     r8_srgb, rg8_srgb, rgba8_srgb, abgr8_srgb, bgra8_srgb,
     r16_unorm, rg16_unorm, rgba16_unorm,
-    d16_unorm, d32_float,
+    d16_unorm, d16_unorm_s8_uint, d24_unorm_pack32, d24_unorm_s8_uint, d32_float,
     r16_float, rg16_float, rgba16_float, r32_float, rg32_float, rgba32_float,
-    bc1_rgba_unorm, bc3_rgba_unorm, bc7_rgba_unorm,
+    bc1_rgba_unorm, bc3_rgba_unorm, bc4_r_unorm, bc5_rg_unorm, bc6h_rgb_float, bc7_rgba_unorm, bc7_rgba_srgb,
+    astc_4x4_rgba_unorm, etc2_rgb8_unorm, etc2_rgba8_unorm, eac_r11_unorm, eac_rg11_unorm,
 };
 
 pub const TextureType = enum(u3) { @"2d", @"3d", @"1d", cube, @"2d_array", @"1d_array", cube_array };

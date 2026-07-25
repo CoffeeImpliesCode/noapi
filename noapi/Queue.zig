@@ -11,15 +11,17 @@ handle: Gpu.QueueHandle = .null_handle,
 pub fn submit(self: *Queue, cmd_bufs: []const CommandBuffer) void {
     if (cmd_bufs.len == 0) return;
     var handles: [64]Gpu.CommandBufferHandle = undefined;
-    for (cmd_bufs, 0..) |cb, i| handles[i] = cb.handle;
-    self.gpu.backend.queueSubmit(handles[0..cmd_bufs.len]);
+    const cap = @min(cmd_bufs.len, 64);
+    for (cmd_bufs[0..cap], 0..) |cb, i| handles[i] = cb.handle;
+    self.gpu.backend.queueSubmit(handles[0..cap]);
 }
 
 pub fn submitSignal(self: *Queue, cmd_bufs: []const CommandBuffer, sem: Semaphore, value: u64) void {
     if (cmd_bufs.len == 0) return;
     var handles: [64]Gpu.CommandBufferHandle = undefined;
-    for (cmd_bufs, 0..) |cb, i| handles[i] = cb.handle;
-    self.gpu.backend.queueSubmitSignal(handles[0..cmd_bufs.len], sem.handle, value);
+    const cap = @min(cmd_bufs.len, 64);
+    for (cmd_bufs[0..cap], 0..) |cb, i| handles[i] = cb.handle;
+    self.gpu.backend.queueSubmitSignal(handles[0..cap], sem.handle, value);
 }
 
 pub fn waitIdle(self: *Queue) void {

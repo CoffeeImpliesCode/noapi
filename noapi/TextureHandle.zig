@@ -2,7 +2,6 @@
 //! Two variants: real pooled textures and per-window swapchain images.
 //! Use .isSwapchain() to check variant, then access .texture or .swapchain.
 
-const std = @import("std");
 const TextureHandle = @This();
 
 pub const TextureData = struct { id: u32, birth_frame: u16 };

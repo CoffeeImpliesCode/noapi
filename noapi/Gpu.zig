@@ -66,7 +66,12 @@ pub fn init(options: Options) !Gpu {
 }
 
 pub fn deinit(self: *Gpu) void {
+    self.backend.flushPendingFrees();
     self.backend.deinit();
+}
+
+pub fn flushPendingFrees(self: *Gpu) void {
+    self.backend.flushPendingFrees();
 }
 
 pub fn waitIdle(self: *Gpu) void {
@@ -114,7 +119,7 @@ pub fn semaphoreDestroy(self: *Gpu, sem: Semaphore) void {
 
 pub fn bufferCreate(self: *Gpu, desc: BufferDesc) !Buffer {
     const ptr = try self.gpuMalloc(desc.size, 64, .gpu);
-    return Buffer{ .gpu = self, .handle = @enumFromInt(ptr.vk_buffer), .gpu_ptr = ptr };
+    return Buffer{ .gpu = self, .gpu_ptr = ptr };
 }
 pub fn bufferDestroy(self: *Gpu, buf: Buffer) void {
     self.gpuFree(buf.gpu_ptr);
@@ -136,6 +141,12 @@ pub fn textureViewDescriptor(self: *Gpu, tex: TextureHandle, view_desc: TextureV
 pub fn descHeapSetTexturesRw(self: *Gpu, heap: DescriptorHeap, start_idx: u32, descriptors: []const u64) void {
     self.backend.descHeapSetTexturesRw(heap.index, start_idx, descriptors);
 }
+pub fn descHeapSetTextures(self: *Gpu, heap: DescriptorHeap, start_idx: u32, descriptors: []const u64) void {
+    self.backend.descHeapSetTextures(heap.index, start_idx, descriptors);
+}
+pub fn descHeapSetSamplers(self: *Gpu, heap: DescriptorHeap, start_idx: u32, descriptors: []const u64) void {
+    self.backend.descHeapSetSamplers(heap.index, start_idx, descriptors);
+}
 pub fn textureRwViewDescriptor(self: *Gpu, tex: TextureHandle, view_desc: TextureViewDesc) u64 {
     return self.backend.textureRwViewDescriptor(tex, view_desc);
 }
@@ -144,6 +155,13 @@ pub fn samplerDescriptor(self: *Gpu, desc: SamplerDesc) u64 {
 }
 pub fn semaphoreWait(self: *Gpu, sem: Semaphore, value: u64) void {
     self.backend.semaphoreWait(sem.handle, value);
+}
+
+pub fn queueSubmit(self: *Gpu, cmd_bufs: []const CommandBuffer) void {
+    var handles: [64]vk.CommandBuffer = undefined;
+    const count = @min(cmd_bufs.len, handles.len);
+    for (cmd_bufs[0..count], 0..) |cb, i| handles[i] = cb.handle;
+    self.backend.queueSubmit(handles[0..count]);
 }
 
 pub fn descHeapCreate(self: *Gpu, texture_count: u32, texture_rw_count: u32, sampler_count: u32) !DescriptorHeap {
@@ -159,7 +177,6 @@ pub fn drawTriangles(self: *Gpu, cmd: CommandBuffer, texture: ?TextureHandle, ve
     const vert_bytes = @sizeOf(Vertex) * vertices.len;
     const idx_bytes = @sizeOf(u32) * indices.len;
     const buf = self.gpuMalloc(@intCast(vert_bytes + idx_bytes), 64, .default) catch return;
-    defer self.gpuFree(buf);
 
     @memcpy(buf.cpu[0..vert_bytes], @as([*]const u8, @ptrCast(vertices.ptr))[0..vert_bytes]);
     @memcpy(buf.cpu[vert_bytes..][0..idx_bytes], @as([*]const u8, @ptrCast(indices.ptr))[0..idx_bytes]);
@@ -181,12 +198,22 @@ pub fn drawTriangles(self: *Gpu, cmd: CommandBuffer, texture: ?TextureHandle, ve
         self.backend.cmdSetScissor(cmd.handle, .{ .x = cr.x, .y = cr.y, .width = cr.w, .height = cr.h });
     }
     if (texture) |tex| {
-        _ = tex;
+        if (tex.texture.id != 0) {
+            const heap = self.descHeapCreate(1, 0, 1) catch return;
+            defer self.descHeapDestroy(heap);
+            const tex_view = self.textureViewDescriptor(tex, .{ .format = .default });
+            const sampler = self.samplerDescriptor(.{ .min_filter = .linear, .mag_filter = .linear, .mip_filter = .linear });
+            self.descHeapSetTextures(heap, 0, &.{tex_view});
+            self.descHeapSetSamplers(heap, 0, &.{sampler});
+            self.backend.cmdBindDescriptorSets(cmd.handle, heap.index);
+        }
     }
     self.backend.cmdDrawIndexed(cmd.handle, @intCast(indices.len), 1, 0, 0);
 }
 
 pub fn generateMipmaps(self: *Gpu, cmd: CommandBuffer, texture: Texture) void {
+    // Ensure any prior writes to the texture are visible to the first blit
+    self.backend.cmdBarrier(cmd.handle, .{ .transfer = true }, .{ .transfer = true }, .{});
     var mip: u32 = 1;
     while (mip < texture.mip_count) : (mip += 1) {
         if (mip > 1) {
@@ -206,6 +233,10 @@ pub fn gpuFree(self: *Gpu, ptr: GpuPtr) void {
 }
 pub fn gpuHostToDevicePointer(self: *Gpu, cpu_ptr: [*]u8) GpuPtr {
     return self.backend.gpuHostToDevicePointer(cpu_ptr);
+}
+
+pub fn instanceHandle(self: *const Gpu) vk.Instance {
+    return self.backend.instance.handle;
 }
 
 // ── Basic types ──────────────────────────────────────────────

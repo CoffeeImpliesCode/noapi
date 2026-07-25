@@ -1,10 +1,16 @@
 //! Command buffer — GPU command recording.
 const std = @import("std");
+const vk = @import("vk.zig");
 const Gpu = @import("Gpu.zig");
+const SamplerDesc = @import("Texture.zig").SamplerDesc;
 const CommandBuffer = @This();
 
 gpu: *Gpu,
 handle: Gpu.CommandBufferHandle = .null_handle,
+
+tex_heap: ?DescriptorHeap = null,
+tex_count: u32 = 0,
+tex_samp_count: u32 = 0,
 
 pub const PushData = extern struct {
     vert_data: u64 = 0,
@@ -12,7 +18,12 @@ pub const PushData = extern struct {
     indirect: u64 = 0,
 };
 
-pub const IndexFormat = enum(u32) { u16 = 0, u32 };
+pub const IndexFormat = enum(u32) {
+    u16 = 0,
+    u32 = 1,
+    u8 = 1000265000,
+    none = 1000165000,
+};
 
 pub const DrawIndexedIndirectCommand = extern struct {
     index_count: u32,
@@ -45,10 +56,10 @@ pub fn drawIndexedIndirect(self: *CommandBuffer, data: PushData, indices: GpuPtr
     self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
     self.gpu.backend.cmdDrawIndexedIndirect(self.handle, @enumFromInt(arguments.vk_buffer), 0, max_draws, @sizeOf(DrawIndexedIndirectCommand));
 }
-pub fn drawIndexedIndirectMulti(self: *CommandBuffer, data: PushData, indices: GpuPtr, arguments: GpuPtr, stride: u32, draw_count: u32) void {
+pub fn drawIndexedIndirectMulti(self: *CommandBuffer, data: PushData, indices: GpuPtr, arguments: GpuPtr, stride: u32, count_buffer: GpuPtr, count_offset: u64, max_draws: u32) void {
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
     self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
-    self.gpu.backend.cmdDrawIndexedIndirectMulti(self.handle, @enumFromInt(arguments.vk_buffer), 0, draw_count, stride);
+    self.gpu.backend.cmdDrawIndexedIndirectMulti(self.handle, @enumFromInt(arguments.vk_buffer), 0, stride, @enumFromInt(count_buffer.vk_buffer), count_offset, max_draws);
 }
 pub fn dispatch(self: *CommandBuffer, data: u64, group_x: u32, group_y: u32, group_z: u32) void {
     self.gpu.backend.cmdPushConstantsCompute(self.handle, data);
@@ -79,6 +90,9 @@ pub fn setRasterState(self: *CommandBuffer, state: RasterState) void {
 pub fn setBlendState(self: *CommandBuffer, state: BlendState) void {
     self.gpu.backend.cmdSetBlendState(self.handle, state);
 }
+pub fn setBlendEnable(self: *CommandBuffer, enable: bool) void {
+    self.gpu.backend.cmdSetBlendEnable(self.handle, enable);
+}
 pub fn setViewport(self: *CommandBuffer, vp: Viewport) void {
     self.gpu.backend.cmdSetViewport(self.handle, vp);
 }
@@ -88,7 +102,39 @@ pub fn setScissor(self: *CommandBuffer, sc: Scissor) void {
 pub fn bindDescriptorSets(self: *CommandBuffer, heap: DescriptorHeap) void {
     self.gpu.backend.cmdBindDescriptorSets(self.handle, heap.index);
 }
-pub fn beginRendering(self: *CommandBuffer, desc: RenderingDesc) void {
+pub fn bindTexture(self: *CommandBuffer, slot: u32, texture: TextureHandle, sampler: ?SamplerDesc) void {
+    if (slot >= 8) return;
+    if (self.tex_heap == null) {
+        self.tex_heap = self.gpu.descHeapCreate(8, 0, 8) catch return;
+        self.tex_count = 0;
+        self.tex_samp_count = 0;
+        self.gpu.backend.cmdBindDescriptorSets(self.handle, self.tex_heap.?.index);
+    }
+    const heap = self.tex_heap.?;
+    if (self.tex_count <= slot) self.tex_count = slot + 1;
+    const tex_desc = self.gpu.textureViewDescriptor(texture, .{});
+    self.gpu.descHeapSetTextures(heap, slot, &.{tex_desc});
+    if (sampler) |s| {
+        const samp_desc = self.gpu.samplerDescriptor(s);
+        self.gpu.descHeapSetSamplers(heap, slot, &.{samp_desc});
+        if (self.tex_samp_count <= slot) self.tex_samp_count = slot + 1;
+    }
+}
+pub fn bindSampler(self: *CommandBuffer, slot: u32, sampler: SamplerDesc) void {
+    if (slot >= 8) return;
+    if (self.tex_heap == null) return;
+    const heap = self.tex_heap.?;
+    const samp_desc = self.gpu.samplerDescriptor(sampler);
+    self.gpu.descHeapSetSamplers(heap, slot, &.{samp_desc});
+    if (self.tex_samp_count <= slot) self.tex_samp_count = slot + 1;
+}
+pub fn deinitTexHeap(self: *CommandBuffer) void {
+    if (self.tex_heap) |heap| {
+        self.gpu.descHeapDestroy(heap);
+        self.tex_heap = null;
+    }
+}
+pub fn beginRendering(self: *CommandBuffer, desc: Rendering) void {
     self.gpu.backend.cmdBeginRendering(self.handle, desc);
 }
 pub fn endRendering(self: *CommandBuffer) void {
@@ -136,7 +182,7 @@ const BlendState = @import("BlendState.zig");
 const Viewport = @import("Viewport.zig");
 const Scissor = @import("Viewport.zig").Scissor;
 const DescriptorHeap = @import("DescriptorHeap.zig");
-const RenderingDesc = @import("Rendering.zig");
+const Rendering = @import("Rendering.zig");
 const Texture = @import("Texture.zig");
 const TextureRegion = @import("Texture.zig").TextureRegion;
 const BlitRect = @import("Texture.zig").BlitRect;

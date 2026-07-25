@@ -1,7 +1,5 @@
 //! GPU-mappable pointer: {cpu VA, gpu VA}.
 const std = @import("std");
-const GpuError = @import("GpuError.zig").GpuError;
-const MemoryType = @import("GpuError.zig").MemoryType;
 const GpuPtr = @This();
 
 cpu: [*]u8 = undefined,
@@ -14,10 +12,6 @@ pub fn offset(self: GpuPtr, bytes: usize) GpuPtr {
 
 pub fn GpuSlice(comptime T: type) type {
     return struct { cpu: []T, gpu: u64 };
-}
-
-pub fn memAlloc(comptime T: type, count: usize, mem_type: MemoryType) GpuError!GpuPtr {
-    _ = T; _ = count; _ = mem_type; return GpuError.BackendError;
 }
 
 pub fn memSuballoc(ptr: GpuPtr, comptime T: type, byte_offset: usize, count: usize) GpuSlice(T) {

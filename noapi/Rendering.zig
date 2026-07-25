@@ -1,10 +1,18 @@
 //! Rendering attachment description for dynamic rendering.
 const std = @import("std");
 const TextureHandle = @import("TextureHandle.zig");
-const RenderingDesc = @This();
+const Rendering = @This();
 
-pub const LoadOp = enum(u2) { clear, load, dont_care };
-pub const StoreOp = enum(u2) { store, dont_care, resolve };
+pub const LoadOp = enum(u2) {
+    load = 0,
+    clear = 1,
+    dont_care = 2,
+};
+
+pub const StoreOp = enum(u2) {
+    store = 0,
+    dont_care = 1,
+};
 
 pub const RenderingAttachment = struct {
     texture: TextureHandle = .{ .texture = .{ .id = 0, .birth_frame = 0 } },

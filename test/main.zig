@@ -50,13 +50,13 @@ pub fn main(init: std.process.Init) !void {
     defer gpu.deinit();
 
     // ── Windows + surfaces ────────────────────────────────
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.backend.instance.handle)), null);
+    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
     var surf1 = try noapi.Surface.init(&gpu, surface, .{ .width = 800, .height = 600 });
 
     const sdl_win2 = try sdl3.video.Window.init("noapi-2", 400, 300, .{ .resizable = true });
     try sdl_win2.show();
-    const sdl_surface2 = try sdl3.vulkan.Surface.init(sdl_win2, @ptrFromInt(@intFromEnum(gpu.backend.instance.handle)), null);
+    const sdl_surface2 = try sdl3.vulkan.Surface.init(sdl_win2, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface2: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface2.surface));
     var surf2 = try noapi.Surface.init(&gpu, surface2, .{ .width = 400, .height = 300 });
 
