@@ -1,6 +1,8 @@
 .envrc
 .devenv/
 .direnv/
+.codegraph/
+.omo/
 notes/
 .zig-cache/
 zig-out/

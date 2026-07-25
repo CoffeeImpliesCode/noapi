@@ -45,19 +45,20 @@ pub fn main(init: std.process.Init) !void {
             .get_instance_extensions = &getExts,
         },
         .io = io,
+        .allocator = gpa,
     });
     defer gpu.deinit();
 
     // ── Windows + surfaces ────────────────────────────────
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.backend.instance.handle)), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    _ = try gpu.addWindow(surface, .{ .width = 800, .height = 600 });
+    var surf1 = try noapi.Surface.init(&gpu, surface, .{ .width = 800, .height = 600 });
 
     const sdl_win2 = try sdl3.video.Window.init("noapi-2", 400, 300, .{ .resizable = true });
     try sdl_win2.show();
     const sdl_surface2 = try sdl3.vulkan.Surface.init(sdl_win2, @ptrFromInt(@intFromEnum(gpu.backend.instance.handle)), null);
     const surface2: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface2.surface));
-    _ = try gpu.addWindow(surface2, .{ .width = 400, .height = 300 });
+    var surf2 = try noapi.Surface.init(&gpu, surface2, .{ .width = 400, .height = 300 });
 
     const win1_id = try sdl_win.getId();
     const win2_id = try sdl_win2.getId();
@@ -186,10 +187,8 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // ── Spawn window render threads ───────────────────────
-    var gw1 = noapi.Window{ .gpu = &gpu, .index = 0 };
-    var gw2 = noapi.Window{ .gpu = &gpu, .index = 1 };
-    const thread1 = try std.Thread.spawn(.{}, window1, .{ &gw1, &w1 });
-    const thread2 = try std.Thread.spawn(.{}, window2, .{ &gw2, &w2 });
+    const thread1 = try std.Thread.spawn(.{}, window1, .{ &surf1, &w1 });
+    const thread2 = try std.Thread.spawn(.{}, window2, .{ &surf2, &w2 });
 
     // ── Main thread: event loop only ─────────────────────
     while (!w1.should_close or !w2.should_close) {
@@ -212,7 +211,7 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .window_resized => |we| {
                     const wid = we.id;
-                    if (wid == win1_id) gw1.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) }) else if (wid == win2_id) gw2.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (wid == win1_id) surf1.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) }) else if (wid == win2_id) surf2.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
                 },
                 else => {},
             }
@@ -249,9 +248,9 @@ const SharedW1 = struct {
     test_sem: noapi.Semaphore,
 };
 
-fn window1(win: *noapi.Window, s: *SharedW1) void {
+fn window1(win: *noapi.Surface, s: *SharedW1) void {
     defer {
-        win.gpu.backend.removeWindow(win.index);
+        win.deinit();
         s.sdl.deinit();
     }
     while (!s.should_close) {
@@ -279,7 +278,7 @@ fn window1(win: *noapi.Window, s: *SharedW1) void {
         cmd.endRendering();
 
         // ── Pass 2: main scene to swapchain ───────────────────
-        const sc = win.currentSwapchainImage();
+        const sc = win.currentImage();
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{
                 0.1 + @sin(s.time_sec * 0.5) * 0.05,
@@ -373,9 +372,9 @@ const SharedW2 = struct {
     compute_tex: noapi.TextureHandle,
 };
 
-fn window2(win: *noapi.Window, s: *SharedW2) void {
+fn window2(win: *noapi.Surface, s: *SharedW2) void {
     defer {
-        win.gpu.backend.removeWindow(win.index);
+        win.deinit();
         s.sdl.deinit();
     }
     while (!s.should_close) {
@@ -390,7 +389,7 @@ fn window2(win: *noapi.Window, s: *SharedW2) void {
         const sz2 = win.surfaceSize();
         var cmd = win.commandsBegin();
 
-        const sc = win.currentSwapchainImage();
+        const sc = win.currentImage();
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{ 0.1, 0.2, 0.3, 1.0 } },
         }, .render_area_size = .{ sz2.width, sz2.height } });

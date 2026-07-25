@@ -1,9 +1,8 @@
 //! Texture resource + format/type/view/sampler descriptors.
 const std = @import("std");
+const Gpu = @import("Gpu.zig");
 const TextureHandle = @import("TextureHandle.zig");
 const GpuPtr = @import("GpuPtr.zig");
-const Queue = @import("Queue.zig");
-const Semaphore = @import("Semaphore.zig");
 const Texture = @This();
 
 pub const TextureFormat = enum(u8) {
@@ -52,6 +51,7 @@ pub const BlitRect = struct {
     mip_level: u32 = 0, base_layer: u32 = 0, layer_count: u32 = 1,
 };
 
+gpu: *Gpu,
 handle: TextureHandle = .{},
 type: TextureType = .@"2d",
 dimensions: [3]u32 = .{ 0, 0, 0 },
@@ -60,11 +60,56 @@ mip_count: u32 = 1,
 layer_count: u32 = 1,
 sample_count: u32 = 1,
 
-pub fn create(desc: TextureDesc, storage: GpuPtr, queue: Queue, signal_sem: Semaphore, signal_value: u64, name: []const u8) Texture {
-    _ = desc; _ = storage; _ = queue; _ = signal_sem; _ = signal_value; _ = name;
-    return .{};
+pub fn create(gpu: *Gpu, desc: TextureDesc) !Texture {
+    const handle = try gpu.textureCreate(desc);
+    return .{
+        .gpu = gpu,
+        .handle = handle,
+        .type = desc.type,
+        .dimensions = desc.dimensions,
+        .format = desc.format,
+        .mip_count = desc.mip_count,
+        .layer_count = desc.layer_count,
+        .sample_count = desc.sample_count,
+    };
 }
 
-pub fn destroy(self: *Texture) void { _ = self; }
+pub fn destroy(self: *Texture) void {
+    self.gpu.textureDestroy(self.handle);
+}
+
+/// OwnedTexture pairs texture memory allocation with texture creation,
+/// and destruction with memory freeing.
+pub const OwnedTexture = struct {
+    texture: Texture,
+    mem: GpuPtr,
+    gpu: *Gpu,
+
+    pub fn allocAndCreate(gpu: *Gpu, desc: TextureDesc) !OwnedTexture {
+        const size_align = gpu.textureSizeAndAlign(desc);
+        const mem = try gpu.gpuMalloc(size_align.size, @intCast(size_align.alignment), .gpu);
+        errdefer gpu.gpuFree(mem);
+        const handle = try gpu.backend.textureCreate(desc, mem, 0);
+        return .{
+            .texture = .{
+                .gpu = gpu,
+                .handle = handle,
+                .type = desc.type,
+                .dimensions = desc.dimensions,
+                .format = desc.format,
+                .mip_count = desc.mip_count,
+                .layer_count = desc.layer_count,
+                .sample_count = desc.sample_count,
+            },
+            .mem = mem,
+            .gpu = gpu,
+        };
+    }
+
+    pub fn freeAndDestroy(self: *OwnedTexture) void {
+        self.gpu.textureDestroy(self.texture.handle);
+        self.gpu.gpuFree(self.mem);
+    }
+};
 
 test { std.testing.refAllDecls(@This()); }

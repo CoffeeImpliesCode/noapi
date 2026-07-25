@@ -12,7 +12,22 @@ const Buffer = @import("Buffer.zig");
 const CommandBuffer = @import("CommandBuffer.zig");
 const Texture = @import("Texture.zig");
 const DescriptorHeap = @import("DescriptorHeap.zig");
-const GpuArena = @import("GpuArena.zig");
+
+// Imports for types used internally (no longer re-exported — root.zig handles that)
+const TextureHandle = @import("TextureHandle.zig");
+const DeviceLimits = @import("DeviceLimits.zig");
+const GpuPtr = @import("GpuPtr.zig");
+const GpuError = @import("GpuError.zig").GpuError;
+const MemoryType = @import("GpuError.zig").MemoryType;
+const ShaderStage = @import("Shader.zig").ShaderStage;
+const BufferDesc = @import("Buffer.zig").BufferDesc;
+const TextureDesc = @import("Texture.zig").TextureDesc;
+const TextureViewDesc = @import("Texture.zig").TextureViewDesc;
+const SamplerDesc = @import("Texture.zig").SamplerDesc;
+const Vertex = @import("Vertex.zig");
+const Rect = @import("Rect.zig");
+const VertexBinding = @import("VertexInput.zig").VertexBinding;
+const VertexAttribute = @import("VertexInput.zig").VertexAttribute;
 
 pub const Gpu = @This();
 
@@ -33,6 +48,7 @@ pub const Options = struct {
     app_name: [:0]const u8 = "noapi",
     loader: VkBackend.Options.Loader = .{},
     io: std.Io,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
 };
 
 pub fn init(options: Options) !Gpu {
@@ -43,6 +59,7 @@ pub fn init(options: Options) !Gpu {
             .frames_in_flight = options.frames_in_flight,
             .loader = options.loader,
             .io = options.io,
+            .allocator = options.allocator,
         }),
         .frames_in_flight = options.frames_in_flight,
     };
@@ -52,30 +69,21 @@ pub fn deinit(self: *Gpu) void {
     self.backend.deinit();
 }
 
-pub fn beginFrame(self: *Gpu, window_index: u32) !FrameSchedule {
-    return self.backend.beginFrame(window_index);
-}
-pub fn endFrame(self: *Gpu, window_index: u32, present: ?PresentInfo) FrameResult {
-    return self.backend.endFrame(window_index, present);
-}
 pub fn waitIdle(self: *Gpu) void {
     self.backend.waitIdle();
 }
 
-pub fn addWindow(self: *Gpu, surface: vk.SurfaceKHR, initial_extent: Extent2D) !u32 {
-    return self.backend.addWindow(surface, initial_extent);
+pub fn commandsBegin(self: *Gpu) !CommandBuffer {
+    const handle = try self.backend.commandsBegin();
+    return CommandBuffer{ .gpu = self, .handle = handle };
 }
-pub fn removeWindow(self: *Gpu, index: u32) void {
-    self.backend.removeWindow(index);
+
+pub fn commandsEnd(self: *Gpu, cmd: CommandBuffer) void {
+    self.backend.commandsEnd(cmd.handle);
 }
-pub fn numWindows(self: *const Gpu) u32 {
+
+pub fn numSurfaces(self: *const Gpu) u32 {
     return self.backend.numWindows();
-}
-pub fn surfaceSize(self: *const Gpu, window_index: u32) Extent2D {
-    return self.backend.surfaceSize(window_index);
-}
-pub fn notifyResize(self: *Gpu, window_index: u32, size: Extent2D) void {
-    self.backend.notifyResize(window_index, size);
 }
 pub fn deviceLimits(self: *const Gpu) DeviceLimits {
     return self.backend.deviceLimits();
@@ -106,13 +114,15 @@ pub fn semaphoreDestroy(self: *Gpu, sem: Semaphore) void {
 
 pub fn bufferCreate(self: *Gpu, desc: BufferDesc) !Buffer {
     const ptr = try self.gpuMalloc(desc.size, 64, .gpu);
-    return Buffer{ .gpu = self, .handle = .null_handle, .gpu_ptr = ptr };
+    return Buffer{ .gpu = self, .handle = @enumFromInt(ptr.vk_buffer), .gpu_ptr = ptr };
 }
 pub fn bufferDestroy(self: *Gpu, buf: Buffer) void {
-    _ = self;
-    _ = buf;
+    self.gpuFree(buf.gpu_ptr);
 }
 
+pub fn textureSizeAndAlign(self: *Gpu, desc: TextureDesc) @TypeOf(self.backend.textureSizeAndAlign(desc)) {
+    return self.backend.textureSizeAndAlign(desc);
+}
 pub fn textureCreate(self: *Gpu, desc: TextureDesc) !TextureHandle {
     return self.backend.textureCreate(desc, .{}, 0);
 }
@@ -144,29 +154,58 @@ pub fn descHeapDestroy(self: *Gpu, heap: DescriptorHeap) void {
     self.backend.descHeapDestroy(heap.index);
 }
 
-pub fn commandsBegin(self: *Gpu) CommandBuffer {
-    return .{ .gpu = self, .handle = .null_handle };
+pub fn drawTriangles(self: *Gpu, cmd: CommandBuffer, texture: ?TextureHandle, vertices: []const Vertex, indices: []const u32, clip_rect: ?Rect) void {
+    if (vertices.len == 0 or indices.len == 0) return;
+    const vert_bytes = @sizeOf(Vertex) * vertices.len;
+    const idx_bytes = @sizeOf(u32) * indices.len;
+    const buf = self.gpuMalloc(@intCast(vert_bytes + idx_bytes), 64, .default) catch return;
+    defer self.gpuFree(buf);
+
+    @memcpy(buf.cpu[0..vert_bytes], @as([*]const u8, @ptrCast(vertices.ptr))[0..vert_bytes]);
+    @memcpy(buf.cpu[vert_bytes..][0..idx_bytes], @as([*]const u8, @ptrCast(indices.ptr))[0..idx_bytes]);
+
+    const vk_buf: vk.Buffer = @enumFromInt(buf.vk_buffer);
+    const vert_off: u64 = 0;
+    const idx_off: u64 = vert_bytes;
+
+    const bindings = [_]VertexBinding{.{ .binding = 0, .stride = @sizeOf(Vertex), .input_rate = 0 }};
+    const attribs = [_]VertexAttribute{
+        .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = @offsetOf(Vertex, "position") },
+        .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = @offsetOf(Vertex, "uv") },
+        .{ .location = 2, .binding = 0, .format = @intFromEnum(vk.Format.r8g8b8a8_unorm), .offset = @offsetOf(Vertex, "color") },
+    };
+    self.backend.cmdSetVertexInput(cmd.handle, &bindings, &attribs);
+    self.backend.cmdBindVertexBuffer(cmd.handle, 0, vk_buf, vert_off);
+    self.backend.cmdBindIndexBuffer(cmd.handle, vk_buf, idx_off, .u32);
+    if (clip_rect) |cr| {
+        self.backend.cmdSetScissor(cmd.handle, .{ .x = cr.x, .y = cr.y, .width = cr.w, .height = cr.h });
+    }
+    if (texture) |tex| {
+        _ = tex;
+    }
+    self.backend.cmdDrawIndexed(cmd.handle, @intCast(indices.len), 1, 0, 0);
 }
 
-pub fn drawTriangles(self: *Gpu, cmd: CommandBuffer, texture: ?TextureHandle, vertices: []const Vertex, indices: []const u32, clip_rect: ?Rect) void {
-    _ = self;
-    _ = cmd;
-    _ = texture;
-    _ = vertices;
-    _ = indices;
-    _ = clip_rect;
+pub fn generateMipmaps(self: *Gpu, cmd: CommandBuffer, texture: Texture) void {
+    var mip: u32 = 1;
+    while (mip < texture.mip_count) : (mip += 1) {
+        if (mip > 1) {
+            self.backend.cmdBarrier(cmd.handle, .{ .transfer = true }, .{ .transfer = true }, .{});
+        }
+        const src_rect = Texture.BlitRect{ .mip_level = mip - 1 };
+        const dst_rect = Texture.BlitRect{ .mip_level = mip };
+        self.backend.cmdBlitTexture(cmd.handle, texture.handle, dst_rect, texture.handle, src_rect, .linear);
+    }
 }
 
 pub fn gpuMalloc(self: *Gpu, size: u64, alignment: u29, mem_type: MemoryType) GpuError!GpuPtr {
     if (self.backend.gpuMalloc(size, alignment, mem_type)) |ptr| return ptr else |_| return GpuError.BackendError;
 }
-pub fn gpuFree(self: *Gpu, idx: u32) void {
-    self.backend.gpuFree(idx);
+pub fn gpuFree(self: *Gpu, ptr: GpuPtr) void {
+    self.backend.gpuFree(ptr);
 }
 pub fn gpuHostToDevicePointer(self: *Gpu, cpu_ptr: [*]u8) GpuPtr {
-    _ = self;
-    _ = cpu_ptr;
-    return .{};
+    return self.backend.gpuHostToDevicePointer(cpu_ptr);
 }
 
 // ── Basic types ──────────────────────────────────────────────
@@ -174,76 +213,6 @@ pub fn gpuHostToDevicePointer(self: *Gpu, cpu_ptr: [*]u8) GpuPtr {
 pub const FrameSchedule = struct { next_vblank_us: u32, swapchain_recreated: bool };
 pub const FrameResult = struct { gpu_blocked_ns: u64 };
 pub const PresentInfo = struct { blit_to_swapchain: bool = true };
-
-/// Window wraps a Gpu + window index for ergonomic multi-window rendering.
-pub const Window = struct {
-    gpu: *Gpu,
-    index: u32,
-
-    pub fn beginFrame(self: *Window) !FrameSchedule {
-        return self.gpu.backend.beginFrame(self.index);
-    }
-    pub fn endFrame(self: *Window, present: ?PresentInfo) FrameResult {
-        return self.gpu.backend.endFrame(self.index, present);
-    }
-    pub fn currentSwapchainImage(self: *const Window) TextureHandle {
-        return self.gpu.backend.currentSwapchainImage(self.index);
-    }
-    pub fn commandsBegin(self: *Window) CommandBuffer {
-        return .{ .gpu = self.gpu, .handle = self.gpu.backend.getCurrentCmdBuf(self.index) };
-    }
-    pub fn surfaceSize(self: *const Window) Extent2D {
-        return self.gpu.backend.surfaceSize(self.index);
-    }
-    pub fn notifyResize(self: *Window, size: Extent2D) void {
-        self.gpu.backend.notifyResize(self.index, size);
-    }
-};
-
-pub const TextureHandle = @import("TextureHandle.zig");
-pub const Vertex = @import("Vertex.zig");
-pub const Rect = @import("Rect.zig");
-pub const Extent2D = @import("Extent2D.zig");
-pub const DeviceLimits = @import("DeviceLimits.zig");
-pub const GpuPtr = @import("GpuPtr.zig");
-pub const GpuSlice = @import("GpuPtr.zig").GpuSlice;
-pub const memAlloc = @import("GpuPtr.zig").memAlloc;
-pub const memSuballoc = @import("GpuPtr.zig").memSuballoc;
-pub const GpuError = @import("GpuError.zig").GpuError;
-pub const MemoryType = @import("GpuError.zig").MemoryType;
-pub const ShaderStage = @import("Shader.zig").ShaderStage;
-pub const PushData = @import("CommandBuffer.zig").PushData;
-pub const IndexFormat = @import("CommandBuffer.zig").IndexFormat;
-pub const DrawIndexedIndirectCommand = @import("CommandBuffer.zig").DrawIndexedIndirectCommand;
-pub const DispatchIndirectCommand = @import("CommandBuffer.zig").DispatchIndirectCommand;
-pub const Stage = @import("Barrier.zig").Stage;
-pub const Hazard = @import("Barrier.zig").Hazard;
-pub const BufferDesc = @import("Buffer.zig").BufferDesc;
-pub const TextureDesc = @import("Texture.zig").TextureDesc;
-pub const TextureType = @import("Texture.zig").TextureType;
-pub const TextureFormat = @import("Texture.zig").TextureFormat;
-pub const TextureUsage = @import("Texture.zig").TextureUsage;
-pub const TextureViewDesc = @import("Texture.zig").TextureViewDesc;
-pub const TextureRegion = @import("Texture.zig").TextureRegion;
-pub const BlitRect = @import("Texture.zig").BlitRect;
-pub const SamplerDesc = @import("Texture.zig").SamplerDesc;
-pub const Filter = @import("Texture.zig").Filter;
-pub const AddressMode = @import("Texture.zig").AddressMode;
-pub const DepthState = @import("DepthState.zig");
-pub const CompareOp = @import("DepthState.zig").CompareOp;
-pub const RasterState = @import("RasterState.zig");
-pub const Topology = @import("RasterState.zig").Topology;
-pub const CullMode = @import("RasterState.zig").CullMode;
-pub const BlendState = @import("BlendState.zig");
-pub const BlendOp = @import("BlendState.zig").BlendOp;
-pub const BlendFactor = @import("BlendState.zig").BlendFactor;
-pub const Viewport = @import("Viewport.zig");
-pub const Scissor = @import("Viewport.zig").Scissor;
-pub const LoadOp = @import("Rendering.zig").LoadOp;
-pub const StoreOp = @import("Rendering.zig").StoreOp;
-pub const RenderingAttachment = @import("Rendering.zig").RenderingAttachment;
-pub const RenderingDesc = @import("Rendering.zig");
-pub const PlatformWindow = @import("PlatformWindow.zig");
 
 test {
     std.testing.refAllDecls(@This());

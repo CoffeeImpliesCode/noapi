@@ -32,6 +32,9 @@ const TextureUsage = Texture.TextureUsage;
 const TextureRegion = Texture.TextureRegion;
 const BlitRect = Texture.BlitRect;
 const Filter = Texture.Filter;
+const FrameSchedule = @import("Gpu.zig").FrameSchedule;
+const FrameResult = @import("Gpu.zig").FrameResult;
+const PresentInfo = @import("Gpu.zig").PresentInfo;
 
 pub const VkBackend = @This();
 
@@ -62,6 +65,7 @@ device: vk.DeviceProxy = undefined,
 queue: vk.QueueProxy = undefined,
 queue_family_index: u32 = undefined,
 queue_sem: vk.Semaphore = undefined,
+offscreen_cmd_pool: vk.CommandPool = .null_handle,
 queue_counter: u64 = 0,
 queue_mutex: std.Io.Mutex = std.Io.Mutex.init,
 io: std.Io,
@@ -79,6 +83,15 @@ allocs: std.ArrayListUnmanaged(AllocInfo) = .empty,
 textures: std.ArrayListUnmanaged(TextureInfo) = .empty,
 // Descriptor heap pool
 desc_heaps: std.ArrayListUnmanaged(DescHeapInfo) = .empty,
+
+// Cache: texture view descriptors (key = (texture_id << 32) | view_desc_hash)
+texture_view_cache: std.AutoHashMap(u64, vk.ImageView) = undefined,
+// Cache: sampler descriptors (key = sampler_desc_hash)
+sampler_cache: std.AutoHashMap(u64, vk.Sampler) = undefined,
+// Device limits queried at init from VkPhysicalDeviceProperties
+device_limits: DeviceLimits = .{},
+// Memory properties cached at init from vkGetPhysicalDeviceMemoryProperties
+mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
 
 const TextureInfo = struct {
     image: vk.Image,
@@ -125,6 +138,7 @@ pub const Options = struct {
     frames_in_flight: u32 = 2,
     loader: Loader = .{},
     io: std.Io,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
 
     pub const Loader = struct {
         get_instance_proc_addr: ?vk.PfnGetInstanceProcAddr = null,
@@ -195,8 +209,10 @@ const ComputePushConstants = extern struct {
 };
 
 pub fn init(options: Options) !VkBackend {
-    const alloc = std.heap.page_allocator;
+    const alloc = options.allocator;
     var self = VkBackend{ .allocator = alloc, .io = options.io };
+    self.texture_view_cache = std.AutoHashMap(u64, vk.ImageView).init(alloc);
+    self.sampler_cache = std.AutoHashMap(u64, vk.Sampler).init(alloc);
 
     const get_proc_addr = options.loader.get_instance_proc_addr orelse return error.BackendError;
     self.b = vk.BaseWrapper.load(get_proc_addr);
@@ -290,9 +306,38 @@ pub fn init(options: Options) !VkBackend {
         }
     }
     self.physical_device = best_device;
+    self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.physical_device);
 
     const gpu_props = self.instance.getPhysicalDeviceProperties(self.physical_device);
     log.info("GPU: {s}", .{@as([]const u8, &gpu_props.device_name)});
+
+    // Query device limits from Vulkan
+    {
+        const L = gpu_props.limits;
+        self.device_limits = .{
+            .max_anisotropy = L.max_sampler_anisotropy,
+            .max_texture_dimension_2d = L.max_image_dimension_2d,
+            .max_texture_dimension_3d = L.max_image_dimension_3d,
+            .max_texture_array_layers = L.max_image_array_layers,
+            .max_push_constants_size = L.max_push_constants_size,
+            .max_viewports = L.max_viewports,
+            .max_color_attachments = L.max_color_attachments,
+            .max_framebuffer_width = L.max_framebuffer_width,
+            .max_framebuffer_height = L.max_framebuffer_height,
+            .max_framebuffer_layers = L.max_framebuffer_layers,
+            .max_compute_work_group_invocations = L.max_compute_work_group_invocations,
+            .max_compute_shared_memory_size = L.max_compute_shared_memory_size,
+            .min_uniform_buffer_offset_alignment = @intCast(L.min_uniform_buffer_offset_alignment),
+            .min_storage_buffer_offset_alignment = @intCast(L.min_storage_buffer_offset_alignment),
+            // Feature flags — all enabled by the device features struct in init
+            .shader_object = true,
+            .descriptor_buffer = true,
+            .buffer_device_address = true,
+            .dynamic_rendering = true,
+            .timeline_semaphore = true,
+            .descriptor_indexing = true,
+        };
+    }
 
     const qf_all = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(self.physical_device, alloc);
     defer alloc.free(qf_all);
@@ -338,6 +383,13 @@ pub fn init(options: Options) !VkBackend {
         null,
     );
     log.info("Queue timeline semaphore created", .{});
+
+    // Offscreen command pool (transient, for one-shot command buffers)
+    self.offscreen_cmd_pool = try self.device.createCommandPool(&.{
+        .queue_family_index = self.queue_family_index,
+        .flags = .{ .transient_bit = true },
+    }, null);
+    log.info("Offscreen command pool created", .{});
 
     // ── Descriptor set layouts (no_gfx_api pattern) ─────────
     {
@@ -420,12 +472,30 @@ pub fn deinit(self: *VkBackend) void {
         self.device.destroyDescriptorPool(dh.pool, null);
     }
     self.desc_heaps.deinit(self.allocator);
+    // Destroy cached texture views to prevent VkImageView leaks
+    {
+        var it = self.texture_view_cache.iterator();
+        while (it.next()) |entry| {
+            self.device.destroyImageView(entry.value_ptr.*, null);
+        }
+        self.texture_view_cache.deinit();
+    }
+    // Destroy cached samplers to prevent VkSampler leaks
+    {
+        var it = self.sampler_cache.iterator();
+        while (it.next()) |entry| {
+            self.device.destroySampler(entry.value_ptr.*, null);
+        }
+        self.sampler_cache.deinit();
+    }
     for (self.windows.items) |*win| if (win.valid) destroyWindow(self, win);
     self.windows.deinit(self.allocator);
     self.device.destroyPipelineLayout(self.pipeline_layout_compute, null);
     self.device.destroyPipelineLayout(self.pipeline_layout_graphics, null);
     for (&self.desc_layouts) |*layout| self.device.destroyDescriptorSetLayout(layout.*, null);
     self.device.destroySemaphore(self.queue_sem, null);
+    if (self.offscreen_cmd_pool != .null_handle)
+        self.device.destroyCommandPool(self.offscreen_cmd_pool, null);
     self.device.destroyDevice(null);
     if (self.debug_messenger != .null_handle)
         self.instance.destroyDebugUtilsMessengerEXT(self.debug_messenger, null);
@@ -708,7 +778,6 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
 
     if (win.resize_throttle > 0) win.resize_throttle -= 1;
     win.frame_index = (frame + 1) % win.frames_in_flight;
-    if (win.resize_throttle > 0) win.resize_throttle -= 1;
     return .{ .gpu_blocked_ns = 0 };
 }
 pub fn getCurrentCmdBuf(self: *VkBackend, window_index: u32) CommandBufferHandle {
@@ -748,6 +817,21 @@ pub fn queueSubmitSignal(self: *VkBackend, handles: []const CommandBufferHandle,
         .p_signal_semaphores = @ptrCast(&sems),
     };
     self.queue.submit(&.{si}, .null_handle) catch {};
+}
+
+pub fn commandsBegin(self: *VkBackend) !CommandBufferHandle {
+    var cb: vk.CommandBuffer = undefined;
+    try self.device.allocateCommandBuffers(&.{
+        .command_pool = self.offscreen_cmd_pool,
+        .level = .primary,
+        .command_buffer_count = 1,
+    }, @ptrCast(&cb));
+    try self.device.beginCommandBuffer(cb, &.{ .flags = .{ .one_time_submit_bit = true } });
+    return cb;
+}
+
+pub fn commandsEnd(self: *VkBackend, cmd: CommandBufferHandle) void {
+    self.device.endCommandBuffer(cmd) catch {};
 }
 
 pub fn queueWaitIdle(self: *VkBackend) void {
@@ -822,8 +906,8 @@ pub fn cmdSetComputeShader(self: *VkBackend, cmd: CommandBufferHandle, shader: S
 }
 
 pub fn cmdSetDepthState(self: *VkBackend, cmd: CommandBufferHandle, state: DepthState) void {
-    self.device.cmdSetDepthTestEnable(cmd, state.mode.read);
-    self.device.cmdSetDepthWriteEnable(cmd, state.mode.write);
+    self.device.cmdSetDepthTestEnable(cmd, if (state.mode.read) @as(vk.Bool32, .true) else @as(vk.Bool32, .false));
+    self.device.cmdSetDepthWriteEnable(cmd, if (state.mode.write) @as(vk.Bool32, .true) else @as(vk.Bool32, .false));
     self.device.cmdSetDepthCompareOp(cmd, @as(vk.CompareOp, @enumFromInt(@intFromEnum(state.compare))));
     self.device.cmdSetDepthBiasEnable(cmd, @as(vk.Bool32, .false));
     self.device.cmdSetStencilTestEnable(cmd, @as(vk.Bool32, .false));
@@ -894,6 +978,14 @@ pub fn cmdDraw(self: *VkBackend, cmd: CommandBufferHandle, vertex_count: u32, in
 
 pub fn cmdDrawIndexed(self: *VkBackend, cmd: CommandBufferHandle, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32) void {
     self.device.cmdDrawIndexed(cmd, index_count, instance_count, first_index, vertex_offset, 0);
+}
+
+pub fn cmdDrawIndexedIndirect(self: *VkBackend, cmd: CommandBufferHandle, buffer: BufferHandle, offset: u64, draw_count: u32, stride: u32) void {
+    self.device.cmdDrawIndexedIndirect(cmd, buffer, offset, draw_count, stride);
+}
+
+pub fn cmdDrawIndexedIndirectMulti(self: *VkBackend, cmd: CommandBufferHandle, buffer: BufferHandle, offset: u64, draw_count: u32, stride: u32) void {
+    self.device.cmdDrawIndexedIndirectCount(cmd, buffer, offset, buffer, offset, draw_count, stride);
 }
 
 pub fn cmdDispatch(self: *VkBackend, cmd: CommandBufferHandle, group_count_x: u32, group_count_y: u32, group_count_z: u32) void {
@@ -1064,8 +1156,7 @@ pub fn cmdBindDescriptorSets(self: *VkBackend, cmd: CommandBufferHandle, heap: u
 }
 
 pub fn deviceLimits(self: *const VkBackend) DeviceLimits {
-    _ = self;
-    return .{};
+    return self.device_limits;
 }
 pub fn surfaceSize(self: *const VkBackend, window_index: u32) Extent2D {
     if (window_index < self.windows.items.len) return self.windows.items[window_index].extent;
@@ -1151,9 +1242,6 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
             break;
         }
     }
-
-    const image_count = @max(caps.min_image_count, win.frames_in_flight + 1);
-    _ = image_count;
 
     // Hand the surface to the device for swapchain maintenance
     const swapchain_ci = vk.SwapchainCreateInfoKHR{
@@ -1385,11 +1473,11 @@ pub fn textureSizeAndAlign(self: *VkBackend, desc: TextureDesc) struct { size: u
         .sharing_mode = .exclusive,
         .initial_layout = .undefined,
     };
-    const reqs = self.device.getDeviceImageMemoryRequirements(&.{ .p_create_info = &img_info });
-    return .{ .size = reqs.size, .alignment = reqs.alignment };
+    var mem_reqs: vk.MemoryRequirements2 = .{};
+    self.device.getDeviceImageMemoryRequirements(&.{ .p_create_info = &img_info }, &mem_reqs);
+    return .{ .size = mem_reqs.memory_requirements.size, .alignment = mem_reqs.memory_requirements.alignment };
 }
 pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue_index: u32) !TextureHandle {
-    _ = storage;
     _ = queue_index;
     const img_info = vk.ImageCreateInfo{
         .image_type = toVkImageType(desc.type),
@@ -1416,16 +1504,24 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
     const image = try self.device.createImage(&img_info, null);
     errdefer self.device.destroyImage(image, null);
 
-    const mem_reqs = self.device.getImageMemoryRequirements(image);
-    const mem_type_idx = findMemoryType(self, mem_reqs.memory_type_bits, .{ .device_local_bit = true }) orelse return error.OutOfMemory;
-    const image_memory = try self.device.allocateMemory(&.{
-        .allocation_size = mem_reqs.size,
-        .memory_type_index = mem_type_idx,
-    }, null);
-    errdefer self.device.freeMemory(image_memory, null);
+    const owned_memory = storage.vk_buffer == 0;
+    const image_memory: vk.DeviceMemory = if (!owned_memory) blk: {
+        const target_buf: vk.Buffer = @enumFromInt(storage.vk_buffer);
+        break :blk for (self.allocs.items) |a| {
+            if (a.buf == target_buf) break a.memory;
+        } else return error.OutOfMemory;
+    } else blk: {
+        const mem_reqs = self.device.getImageMemoryRequirements(image);
+        const mem_type_idx = findMemoryType(self, mem_reqs.memory_type_bits, .{ .device_local_bit = true }) orelse return error.OutOfMemory;
+        break :blk try self.device.allocateMemory(&.{
+            .allocation_size = mem_reqs.size,
+            .memory_type_index = mem_type_idx,
+        }, null);
+    };
+    errdefer if (owned_memory) self.device.freeMemory(image_memory, null);
     try self.device.bindImageMemory(image, image_memory, 0);
 
-    // Transition UNDEFINED -> GENERAL (no_gfx_api pattern: lines 1382-1410)
+    // Transition UNDEFINED -> GENERAL
     {
         const pool = try self.device.createCommandPool(&.{
             .queue_family_index = self.queue_family_index,
@@ -1499,7 +1595,7 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
     const default_view = try self.device.createImageView(&view_info, null);
     errdefer self.device.destroyImageView(default_view, null);
 
-    try self.textures.append(self.allocator, .{ .image = image, .default_view = default_view, .memory = image_memory, .format = toVkFormat(desc.format) });
+    try self.textures.append(self.allocator, .{ .image = image, .default_view = default_view, .memory = if (owned_memory) image_memory else .null_handle, .format = toVkFormat(desc.format) });
     return TextureHandle{ .tag = .texture, .texture = .{ .id = @intCast(self.textures.items.len), .birth_frame = 0 } };
 }
 
@@ -1535,6 +1631,21 @@ pub fn textureDestroy(self: *VkBackend, tex: TextureHandle) void {
     if (tex.isSwapchain()) return;
     const t = tex.texture;
     if (t.id == 0 or t.id > self.textures.items.len) return;
+    // Destroy all cached views for this texture
+    {
+        var keys_to_remove = std.ArrayListUnmanaged(u64).empty;
+        defer keys_to_remove.deinit(self.allocator);
+        var it = self.texture_view_cache.iterator();
+        while (it.next()) |entry| {
+            if (entry.key_ptr.* >> 32 == t.id) {
+                self.device.destroyImageView(entry.value_ptr.*, null);
+                keys_to_remove.append(self.allocator, entry.key_ptr.*) catch {};
+            }
+        }
+        for (keys_to_remove.items) |key| {
+            _ = self.texture_view_cache.remove(key);
+        }
+    }
     const info = self.textures.items[t.id - 1];
     self.device.destroyImageView(info.default_view, null);
     self.device.destroyImage(info.image, null);
@@ -1547,6 +1658,22 @@ pub fn textureViewDescriptor(self: *VkBackend, tex: TextureHandle, view_desc: Te
     const t = tex.texture;
     if (t.id == 0 or t.id > self.textures.items.len) return 0;
     const ti = self.textures.items[t.id - 1];
+
+    // Hash the view desc fields (lower 32 bits) + texture id (upper 32 bits)
+    var h = std.hash.Wyhash.init(0);
+    h.update(&[_]u8{ @intFromEnum(view_desc.type), @intFromEnum(view_desc.format), view_desc.mip_count });
+    h.update(std.mem.asBytes(&view_desc.base_mip));
+    h.update(std.mem.asBytes(&view_desc.base_layer));
+    h.update(std.mem.asBytes(&view_desc.layer_count));
+    const view_desc_hash: u32 = @truncate(h.final());
+    const cache_key: u64 = (@as(u64, t.id) << 32) | view_desc_hash;
+
+    // Cache hit — return existing view
+    if (self.texture_view_cache.get(cache_key)) |cached_view| {
+        return @intFromEnum(cached_view);
+    }
+
+    // Cache miss — create new view
     const vk_format = if (view_desc.format == .default) ti.format else toVkFormat(view_desc.format);
     const view_info = vk.ImageViewCreateInfo{
         .image = ti.image,
@@ -1562,12 +1689,34 @@ pub fn textureViewDescriptor(self: *VkBackend, tex: TextureHandle, view_desc: Te
         },
     };
     const v = self.device.createImageView(&view_info, null) catch return 0;
+    self.texture_view_cache.put(cache_key, v) catch {
+        self.device.destroyImageView(v, null);
+        return 0;
+    };
     return @intFromEnum(v);
 }
 pub fn textureRwViewDescriptor(self: *VkBackend, tex: TextureHandle, view_desc: TextureViewDesc) u64 {
     return self.textureViewDescriptor(tex, view_desc);
 }
 pub fn samplerDescriptor(self: *VkBackend, desc: SamplerDesc) u64 {
+    // Hash the sampler desc fields for cache lookup
+    var h = std.hash.Wyhash.init(0);
+    h.update(&[_]u8{
+        @intFromEnum(desc.min_filter), @intFromEnum(desc.mag_filter), @intFromEnum(desc.mip_filter),
+        @intFromEnum(desc.address_mode_u), @intFromEnum(desc.address_mode_v), @intFromEnum(desc.address_mode_w),
+    });
+    h.update(std.mem.asBytes(&desc.mip_lod_bias));
+    h.update(std.mem.asBytes(&desc.min_lod));
+    h.update(std.mem.asBytes(&desc.max_lod));
+    h.update(std.mem.asBytes(&desc.max_anisotropy));
+    const cache_key: u64 = h.final();
+
+    // Cache hit — return existing sampler
+    if (self.sampler_cache.get(cache_key)) |cached_sampler| {
+        return @intFromEnum(cached_sampler);
+    }
+
+    // Cache miss — create new sampler
     const sampler_info = vk.SamplerCreateInfo{
         .mag_filter = toVkFilter(desc.mag_filter),
         .min_filter = toVkFilter(desc.min_filter),
@@ -1586,6 +1735,10 @@ pub fn samplerDescriptor(self: *VkBackend, desc: SamplerDesc) u64 {
         .unnormalized_coordinates = @as(vk.Bool32, @enumFromInt(0)),
     };
     const s = self.device.createSampler(&sampler_info, null) catch return 0;
+    self.sampler_cache.put(cache_key, s) catch {
+        self.device.destroySampler(s, null);
+        return 0;
+    };
     return @intFromEnum(s);
 }
 
@@ -1628,10 +1781,10 @@ pub fn descHeapDestroy(self: *VkBackend, heap_idx: u32) void {
 pub fn descHeapSetTextures(self: *VkBackend, heap_idx: u32, start_idx: u32, descriptors: []const u64) void {
     if (heap_idx >= self.desc_heaps.items.len or descriptors.len == 0) return;
     const dh = &self.desc_heaps.items[heap_idx];
-    var tmp: [64]vk.DescriptorImageInfo = undefined;
-    const count = @min(descriptors.len, tmp.len);
-    for (descriptors[0..count], 0..) |desc, i| {
-        tmp[i] = .{
+    const buf = self.allocator.alloc(vk.DescriptorImageInfo, descriptors.len) catch return;
+    defer self.allocator.free(buf);
+    for (descriptors, 0..) |desc, i| {
+        buf[i] = .{
             .image_view = @enumFromInt(desc),
             .image_layout = .shader_read_only_optimal,
             .sampler = .null_handle,
@@ -1641,9 +1794,9 @@ pub fn descHeapSetTextures(self: *VkBackend, heap_idx: u32, start_idx: u32, desc
         .dst_set = dh.sets[0],
         .dst_binding = 0,
         .dst_array_element = start_idx,
-        .descriptor_count = @intCast(count),
+        .descriptor_count = @intCast(descriptors.len),
         .descriptor_type = .sampled_image,
-        .p_image_info = tmp[0..count].ptr,
+        .p_image_info = buf.ptr,
         .p_buffer_info = undefined,
         .p_texel_buffer_view = undefined,
     };
@@ -1652,10 +1805,10 @@ pub fn descHeapSetTextures(self: *VkBackend, heap_idx: u32, start_idx: u32, desc
 pub fn descHeapSetTexturesRw(self: *VkBackend, heap_idx: u32, start_idx: u32, descriptors: []const u64) void {
     if (heap_idx >= self.desc_heaps.items.len or descriptors.len == 0) return;
     const dh = &self.desc_heaps.items[heap_idx];
-    var tmp: [64]vk.DescriptorImageInfo = undefined;
-    const count = @min(descriptors.len, tmp.len);
-    for (descriptors[0..count], 0..) |desc, i| {
-        tmp[i] = .{
+    const buf = self.allocator.alloc(vk.DescriptorImageInfo, descriptors.len) catch return;
+    defer self.allocator.free(buf);
+    for (descriptors, 0..) |desc, i| {
+        buf[i] = .{
             .image_view = @enumFromInt(desc),
             .image_layout = .general,
             .sampler = .null_handle,
@@ -1665,9 +1818,9 @@ pub fn descHeapSetTexturesRw(self: *VkBackend, heap_idx: u32, start_idx: u32, de
         .dst_set = dh.sets[1],
         .dst_binding = 0,
         .dst_array_element = start_idx,
-        .descriptor_count = @intCast(count),
+        .descriptor_count = @intCast(descriptors.len),
         .descriptor_type = .storage_image,
-        .p_image_info = tmp[0..count].ptr,
+        .p_image_info = buf.ptr,
         .p_buffer_info = undefined,
         .p_texel_buffer_view = undefined,
     };
@@ -1676,10 +1829,10 @@ pub fn descHeapSetTexturesRw(self: *VkBackend, heap_idx: u32, start_idx: u32, de
 pub fn descHeapSetSamplers(self: *VkBackend, heap_idx: u32, start_idx: u32, descriptors: []const u64) void {
     if (heap_idx >= self.desc_heaps.items.len or descriptors.len == 0) return;
     const dh = &self.desc_heaps.items[heap_idx];
-    var tmp: [64]vk.DescriptorImageInfo = undefined;
-    const count = @min(descriptors.len, tmp.len);
-    for (descriptors[0..count], 0..) |desc, i| {
-        tmp[i] = .{
+    const buf = self.allocator.alloc(vk.DescriptorImageInfo, descriptors.len) catch return;
+    defer self.allocator.free(buf);
+    for (descriptors, 0..) |desc, i| {
+        buf[i] = .{
             .sampler = @enumFromInt(desc),
             .image_view = .null_handle,
             .image_layout = .undefined,
@@ -1689,9 +1842,9 @@ pub fn descHeapSetSamplers(self: *VkBackend, heap_idx: u32, start_idx: u32, desc
         .dst_set = dh.sets[2],
         .dst_binding = 0,
         .dst_array_element = start_idx,
-        .descriptor_count = @intCast(count),
+        .descriptor_count = @intCast(descriptors.len),
         .descriptor_type = .sampler,
-        .p_image_info = tmp[0..count].ptr,
+        .p_image_info = buf.ptr,
         .p_buffer_info = undefined,
         .p_texel_buffer_view = undefined,
     };
@@ -1722,6 +1875,24 @@ pub fn cmdCopyToTexture(self: *VkBackend, cmd: CommandBufferHandle, tex: Texture
         .image_extent = .{ .width = region.size[0], .height = region.size[1], .depth = region.size[2] },
     };
     self.device.cmdCopyBufferToImage(cmd, src, image, .general, &.{copy});
+}
+
+pub fn cmdCopyFromTexture(self: *VkBackend, cmd: CommandBufferHandle, src: TextureHandle, dst: BufferHandle, region: TextureRegion) void {
+    const image = self.resolveTextureImage(src) orelse return;
+    const copy = vk.BufferImageCopy{
+        .buffer_offset = 0,
+        .buffer_row_length = 0,
+        .buffer_image_height = 0,
+        .image_subresource = .{
+            .aspect_mask = .{ .color_bit = true },
+            .mip_level = region.mip_level,
+            .base_array_layer = region.base_layer,
+            .layer_count = region.layer_count,
+        },
+        .image_offset = .{ .x = @as(i32, @intCast(region.rect[0])), .y = @as(i32, @intCast(region.rect[1])), .z = @as(i32, @intCast(region.rect[2])) },
+        .image_extent = .{ .width = region.size[0], .height = region.size[1], .depth = region.size[2] },
+    };
+    self.device.cmdCopyImageToBuffer(cmd, image, .general, dst, &.{copy});
 }
 
 pub fn cmdBlitTexture(self: *VkBackend, cmd: CommandBufferHandle, dst: TextureHandle, dst_rect: BlitRect, src: TextureHandle, src_rect: BlitRect, filter: Filter) void {
@@ -1779,7 +1950,10 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
     };
     const memory = try self.device.allocateMemory(&vk.MemoryAllocateInfo{
         .p_next = @ptrCast(&flags_info),
-        .allocation_size = @max(mem_reqs.size, alignment),
+        .allocation_size = blk: {
+            const aligned_size = (mem_reqs.size + alignment - 1) & ~(@as(u64, alignment) - 1);
+            break :blk aligned_size;
+        },
         .memory_type_index = mem_type_index,
     }, null);
     errdefer self.device.freeMemory(memory, null);
@@ -1808,15 +1982,34 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
     };
 }
 
-pub fn gpuFree(self: *VkBackend, idx: u32) void {
-    if (idx >= self.allocs.items.len) return;
-    const info = self.allocs.items[idx];
-    if (info.cpu != null) self.device.unmapMemory(info.memory);
-    self.device.destroyBuffer(info.buf, null);
-    self.device.freeMemory(info.memory, null);
-    // Pool removal: swap with last, shrink (loses original index but handle is invalid now)
-    self.allocs.items[idx] = self.allocs.items[self.allocs.items.len - 1];
-    self.allocs.items.len -= 1;
+pub fn gpuFree(self: *VkBackend, ptr: GpuPtr) void {
+    const target: vk.Buffer = @enumFromInt(ptr.vk_buffer);
+    for (self.allocs.items, 0..) |info, i| {
+        if (info.buf == target) {
+            if (info.cpu != null) self.device.unmapMemory(info.memory);
+            self.device.destroyBuffer(info.buf, null);
+            self.device.freeMemory(info.memory, null);
+            _ = self.allocs.swapRemove(i);
+            return;
+        }
+    }
+}
+
+pub fn gpuHostToDevicePointer(self: *VkBackend, cpu_ptr: [*]u8) GpuPtr {
+    for (self.allocs.items) |alloc| {
+        if (alloc.cpu) |base| {
+            const start = @intFromPtr(base);
+            const end = start + alloc.size;
+            const ptr = @intFromPtr(cpu_ptr);
+            if (ptr >= start and ptr < end) {
+                return .{
+                    .cpu = cpu_ptr,
+                    .gpu = alloc.gpu_addr + @as(u64, @intCast(ptr - start)),
+                };
+            }
+        }
+    }
+    return .{ .cpu = cpu_ptr, .gpu = @intFromPtr(cpu_ptr) };
 }
 
 pub fn cmdMemCopy(self: *VkBackend, cmd: CommandBufferHandle, src: BufferHandle, dst: BufferHandle, bytes: u64) void {
@@ -1844,14 +2037,9 @@ pub fn cmdBindVertexBuffer(self: *VkBackend, cmd: CommandBufferHandle, binding: 
 }
 
 fn findMemoryType(self: *VkBackend, type_bits: u32, properties: vk.MemoryPropertyFlags) ?u32 {
-    const mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.physical_device);
-    for (mem_props.memory_types, 0..) |mt, i| {
+    for (self.mem_props.memory_types, 0..) |mt, i| {
         if ((type_bits & (@as(u32, 1) << @as(u5, @intCast(i)))) != 0 and
             mt.property_flags.contains(properties)) return @intCast(i);
     }
     return null;
 }
-
-const FrameSchedule = @import("Gpu.zig").FrameSchedule;
-const FrameResult = @import("Gpu.zig").FrameResult;
-const PresentInfo = @import("Gpu.zig").PresentInfo;

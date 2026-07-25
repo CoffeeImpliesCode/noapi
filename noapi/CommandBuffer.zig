@@ -28,12 +28,6 @@ pub const DispatchIndirectCommand = extern struct {
     num_groups_z: u32,
 };
 
-pub fn begin(self: *CommandBuffer) void {
-    _ = self;
-}
-pub fn end(self: *CommandBuffer) void {
-    _ = self;
-}
 pub fn barrier(self: *CommandBuffer, before: Stage, after: Stage, hazards: Hazard) void {
     self.gpu.backend.cmdBarrier(self.handle, before, after, hazards);
 }
@@ -47,11 +41,14 @@ pub fn drawIndexed(self: *CommandBuffer, data: PushData, indices: GpuPtr, index_
     self.gpu.backend.cmdDrawIndexed(self.handle, index_count, instance_count, first_index, vertex_offset);
 }
 pub fn drawIndexedIndirect(self: *CommandBuffer, data: PushData, indices: GpuPtr, arguments: GpuPtr, max_draws: u32) void {
-    _ = self;
-    _ = data;
-    _ = indices;
-    _ = arguments;
-    _ = max_draws;
+    self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
+    self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
+    self.gpu.backend.cmdDrawIndexedIndirect(self.handle, @enumFromInt(arguments.vk_buffer), 0, max_draws, @sizeOf(DrawIndexedIndirectCommand));
+}
+pub fn drawIndexedIndirectMulti(self: *CommandBuffer, data: PushData, indices: GpuPtr, arguments: GpuPtr, stride: u32, draw_count: u32) void {
+    self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
+    self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
+    self.gpu.backend.cmdDrawIndexedIndirectMulti(self.handle, @enumFromInt(arguments.vk_buffer), 0, draw_count, stride);
 }
 pub fn dispatch(self: *CommandBuffer, data: u64, group_x: u32, group_y: u32, group_z: u32) void {
     self.gpu.backend.cmdPushConstantsCompute(self.handle, data);
@@ -106,8 +103,8 @@ pub fn setVertexInput(self: *CommandBuffer, bindings: []const VertexBinding, att
 pub fn copyToTexture(self: *CommandBuffer, tex: Texture, src: GpuPtr, region: TextureRegion) void {
     self.gpu.backend.cmdCopyToTexture(self.handle, tex.handle, @enumFromInt(src.vk_buffer), region);
 }
-pub fn blitTexture(self: *CommandBuffer, dst: Texture, dst_rect: BlitRect, src: Texture, src_rect: BlitRect, filter: Filter) void {
-    self.gpu.backend.cmdBlitTexture(self.handle, dst.handle, dst_rect, src.handle, src_rect, filter);
+pub fn copyFromTexture(self: *CommandBuffer, tex: Texture, dst: GpuPtr, region: TextureRegion) void {
+    self.gpu.backend.cmdCopyFromTexture(self.handle, tex.handle, @enumFromInt(dst.vk_buffer), region);
 }
 pub fn blitTextureHandle(self: *CommandBuffer, dst: TextureHandle, dst_rect: BlitRect, src: TextureHandle, src_rect: BlitRect, filter: Filter) void {
     self.gpu.backend.cmdBlitTexture(self.handle, dst, dst_rect, src, src_rect, filter);

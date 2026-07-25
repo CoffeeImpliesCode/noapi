@@ -17,9 +17,18 @@ pub fn create(heap: DescriptorHeap, texture_count: u32, sampler_count: u32) Desc
 
 pub fn destroy(self: *DescriptorPool) void { self.heap.deinit(); }
 
-pub fn allocTexture(self: *DescriptorPool) TextureDescriptor { _ = self; return 0; }
-pub fn allocTextureRw(self: *DescriptorPool) TextureDescriptor { _ = self; return 0; }
-pub fn allocSampler(self: *DescriptorPool) SamplerDescriptor { _ = self; return 0; }
+pub fn allocTexture(self: *DescriptorPool) TextureDescriptor {
+    defer self.next_texture += 1;
+    return self.next_texture;
+}
+pub fn allocTextureRw(self: *DescriptorPool) TextureDescriptor {
+    defer self.next_texture_rw += 1;
+    return self.next_texture_rw;
+}
+pub fn allocSampler(self: *DescriptorPool) SamplerDescriptor {
+    defer self.next_sampler += 1;
+    return self.next_sampler;
+}
 pub fn freeAll(self: *DescriptorPool) void { self.next_texture = 0; self.next_texture_rw = 0; self.next_sampler = 0; }
 
 test { std.testing.refAllDecls(@This()); }
