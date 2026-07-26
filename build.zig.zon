@@ -9,8 +9,8 @@
             .hash = "sdl3-0.2.0-NmT1Q0mFJwBi9kZmArzh2rfJ_mFshydV0zPGULVlpACc",
         },
         .tracy = .{
-            .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#4921b7dec5e665793f9f87d6ec9336ad450543a4",
-            .hash = "tracy-0.0.0-R7l8BVhNAQBAcLUKg_R72dyRyWRhzTLf1lTvcqVTb9Nc",
+            .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#39cf5b557438bafb64513e4f02546daaa1240599",
+            .hash = "tracy-1.0.0+0.13.1-R7l8BWxQAQB36bRaCuUfFu77XFrBOE2rTMRYTOjX574F",
         },
     },
     .paths = .{

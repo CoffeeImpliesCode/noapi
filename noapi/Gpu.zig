@@ -29,6 +29,8 @@ const Rect = @import("Rect.zig");
 const VertexBinding = @import("VertexInput.zig").VertexBinding;
 const VertexAttribute = @import("VertexInput.zig").VertexAttribute;
 
+const tracy = @import("tracy");
+
 pub const Gpu = @This();
 
 pub const Backend = VkBackend;
@@ -52,6 +54,8 @@ pub const Options = struct {
 };
 
 pub fn init(options: Options) !Gpu {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     return .{
         .backend = try VkBackend.init(.{
             .app_name = options.app_name,
@@ -66,6 +70,8 @@ pub fn init(options: Options) !Gpu {
 }
 
 pub fn deinit(self: *Gpu) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     self.backend.flushPendingFrees();
     self.backend.deinit();
 }
@@ -75,6 +81,8 @@ pub fn flushPendingFrees(self: *Gpu) void {
 }
 
 pub fn waitIdle(self: *Gpu) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     self.backend.waitIdle();
 }
 
@@ -101,19 +109,27 @@ pub fn deviceLimits(self: *const Gpu) DeviceLimits {
 // ── Handle-based resource methods ────────────────────────────
 
 pub fn shaderCreate(self: *Gpu, spv: []const u32, stage: ShaderStage, entry: [:0]const u8, name: [:0]const u8) !Shader {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     _ = name;
     const handle = try self.backend.shaderCreate(spv, @intFromEnum(stage), entry);
     return Shader{ .gpu = self, .handle = handle, .stage = stage };
 }
 
 pub fn shaderDestroy(self: *Gpu, shader: Shader) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     self.backend.shaderDestroy(shader.handle);
 }
 
 pub fn semaphoreCreate(self: *Gpu, initial: u64) !Semaphore {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     return Semaphore{ .gpu = self, .handle = try self.backend.semaphoreCreate(initial) };
 }
 pub fn semaphoreDestroy(self: *Gpu, sem: Semaphore) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     self.backend.semaphoreDestroy(sem.handle);
 }
 
@@ -129,9 +145,13 @@ pub fn textureSizeAndAlign(self: *Gpu, desc: TextureDesc) @TypeOf(self.backend.t
     return self.backend.textureSizeAndAlign(desc);
 }
 pub fn textureCreate(self: *Gpu, desc: TextureDesc) !TextureHandle {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     return self.backend.textureCreate(desc, .{}, 0);
 }
 pub fn textureDestroy(self: *Gpu, tex: TextureHandle) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     self.backend.textureDestroy(tex);
 }
 
@@ -154,10 +174,14 @@ pub fn samplerDescriptor(self: *Gpu, desc: SamplerDesc) u64 {
     return self.backend.samplerDescriptor(desc);
 }
 pub fn semaphoreWait(self: *Gpu, sem: Semaphore, value: u64) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     self.backend.semaphoreWait(sem.handle, value);
 }
 
 pub fn queueSubmit(self: *Gpu, cmd_bufs: []const CommandBuffer) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     var handles: [64]vk.CommandBuffer = undefined;
     const count = @min(cmd_bufs.len, handles.len);
     for (cmd_bufs[0..count], 0..) |cb, i| handles[i] = cb.handle;
@@ -226,9 +250,13 @@ pub fn generateMipmaps(self: *Gpu, cmd: CommandBuffer, texture: Texture) void {
 }
 
 pub fn gpuMalloc(self: *Gpu, size: u64, alignment: u29, mem_type: MemoryType) GpuError!GpuPtr {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     if (self.backend.gpuMalloc(size, alignment, mem_type)) |ptr| return ptr else |_| return GpuError.BackendError;
 }
 pub fn gpuFree(self: *Gpu, ptr: GpuPtr) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     self.backend.gpuFree(ptr);
 }
 pub fn gpuHostToDevicePointer(self: *Gpu, cpu_ptr: [*]u8) GpuPtr {

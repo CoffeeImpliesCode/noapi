@@ -7,6 +7,8 @@ pub fn build(b: *std.Build) void {
     const release_safe = std.builtin.OptimizeMode.ReleaseSafe;
     const sdl3 = b.dependency("sdl3", .{ .target = target, .optimize = release_safe });
     const tracy = b.dependency("tracy", .{ .target = target, .optimize = release_safe });
+    const enable_tracy = b.option(bool, "enable-tracy", "Enable Tracy profiler") orelse true;
+    const tracy_impl = if (enable_tracy) tracy.module("tracy_impl_enabled") else tracy.module("tracy_impl_disabled");
 
     // ── noapi module ──────────────────────────────────────
     const mod = b.addModule("noapi", .{
@@ -36,8 +38,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "noapi", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy_impl },
             },
         }),
+        .use_llvm = true,
     });
     exe.root_module.linkLibrary(lib);
 
@@ -60,8 +64,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "noapi", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy_impl },
             },
         }),
+        .use_llvm = true,
     });
     exe_1_triangle.root_module.linkLibrary(lib);
 
@@ -84,8 +90,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "noapi", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy_impl },
             },
         }),
+        .use_llvm = true,
     });
     tex_exe.root_module.linkLibrary(lib);
 
@@ -108,8 +116,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "noapi", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy_impl },
             },
         }),
+        .use_llvm = true,
     });
     exe_3d.root_module.linkLibrary(lib);
 
@@ -132,8 +142,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "noapi", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy_impl },
             },
         }),
+        .use_llvm = true,
     });
     exe_5.root_module.linkLibrary(lib);
 
@@ -156,8 +168,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "noapi", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy_impl },
             },
         }),
+        .use_llvm = true,
     });
     tex_adv_exe.root_module.linkLibrary(lib);
 
@@ -180,8 +194,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "noapi", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy_impl },
             },
         }),
+        .use_llvm = true,
     });
     exe6.root_module.linkLibrary(lib);
 
@@ -204,8 +220,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "noapi", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy_impl },
             },
         }),
+        .use_llvm = true,
     });
     exe_7.root_module.linkLibrary(lib);
 

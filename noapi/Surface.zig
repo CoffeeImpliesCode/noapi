@@ -4,6 +4,7 @@
 //! the VkBackend.
 
 const std = @import("std");
+const tracy = @import("tracy");
 const Surface = @This();
 
 const Gpu = @import("Gpu.zig").Gpu;
@@ -28,10 +29,12 @@ pub fn deinit(self: *Surface) void {
 }
 
 pub fn beginFrame(self: *Surface) !FrameSchedule {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     return self.gpu.backend.beginFrame(self.index);
 }
 
 pub fn endFrame(self: *Surface, present: ?PresentInfo) FrameResult {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     return self.gpu.backend.endFrame(self.index, present);
 }
 
@@ -40,6 +43,7 @@ pub fn currentImage(self: *const Surface) TextureHandle {
 }
 
 pub fn commandsBegin(self: *Surface) CommandBuffer {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     return .{ .gpu = self.gpu, .handle = self.gpu.backend.getCurrentCmdBuf(self.index) };
 }
 

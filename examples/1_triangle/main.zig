@@ -7,6 +7,16 @@ const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const vk = noapi.vk;
 const Io = std.Io;
+pub const tracy_impl = @import("tracy_impl");
+pub const tracy = @import("tracy");
+pub const tracy_options: tracy.Options = .{
+    .on_demand = false,
+    .no_broadcast = false,
+    .only_localhost = false,
+    .only_ipv4 = false,
+    .delayed_init = false,
+    .manual_lifetime = false,
+};
 
 const start_width = 1000;
 const start_height = 1000;

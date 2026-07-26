@@ -3,6 +3,7 @@ const std = @import("std");
 const vk = @import("vk.zig");
 const Gpu = @import("Gpu.zig");
 const SamplerDesc = @import("Texture.zig").SamplerDesc;
+const tracy = @import("tracy");
 const CommandBuffer = @This();
 
 gpu: *Gpu,
@@ -40,66 +41,84 @@ pub const DispatchIndirectCommand = extern struct {
 };
 
 pub fn barrier(self: *CommandBuffer, before: Stage, after: Stage, hazards: Hazard) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdBarrier(self.handle, before, after, hazards);
 }
 pub fn draw(self: *CommandBuffer, data: PushData, vertex_count: u32, instance_count: u32) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
     self.gpu.backend.cmdDraw(self.handle, vertex_count, instance_count);
 }
 pub fn drawIndexed(self: *CommandBuffer, data: PushData, indices: GpuPtr, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
     self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
     self.gpu.backend.cmdDrawIndexed(self.handle, index_count, instance_count, first_index, vertex_offset);
 }
 pub fn drawIndexedIndirect(self: *CommandBuffer, data: PushData, indices: GpuPtr, arguments: GpuPtr, max_draws: u32) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
     self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
     self.gpu.backend.cmdDrawIndexedIndirect(self.handle, @enumFromInt(arguments.vk_buffer), 0, max_draws, @sizeOf(DrawIndexedIndirectCommand));
 }
 pub fn drawIndexedIndirectMulti(self: *CommandBuffer, data: PushData, indices: GpuPtr, arguments: GpuPtr, stride: u32, count_buffer: GpuPtr, count_offset: u64, max_draws: u32) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
     self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
     self.gpu.backend.cmdDrawIndexedIndirectMulti(self.handle, @enumFromInt(arguments.vk_buffer), 0, stride, @enumFromInt(count_buffer.vk_buffer), count_offset, max_draws);
 }
 pub fn dispatch(self: *CommandBuffer, data: u64, group_x: u32, group_y: u32, group_z: u32) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdPushConstantsCompute(self.handle, data);
     self.gpu.backend.cmdDispatch(self.handle, group_x, group_y, group_z);
 }
 pub fn dispatchIndirect(self: *CommandBuffer, data: u64, arguments: GpuPtr) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdPushConstantsCompute(self.handle, data);
     self.gpu.backend.cmdDispatchIndirect(self.handle, @enumFromInt(arguments.vk_buffer), 0);
 }
 pub fn bindIndexBuffer(self: *CommandBuffer, indices: GpuPtr, format: IndexFormat) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, format);
 }
 pub fn bindVertexBuffer(self: *CommandBuffer, binding: u32, buf: GpuPtr, offset: u64) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdBindVertexBuffer(self.handle, binding, @enumFromInt(buf.vk_buffer), offset);
 }
 pub fn setShaders(self: *CommandBuffer, vert: Shader, frag: Shader) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdSetShaders(self.handle, vert.handle, frag.handle);
 }
 pub fn setComputeShader(self: *CommandBuffer, shader: Shader) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdSetComputeShader(self.handle, shader.handle);
 }
 pub fn setDepthState(self: *CommandBuffer, state: DepthState) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdSetDepthState(self.handle, state);
 }
 pub fn setRasterState(self: *CommandBuffer, state: RasterState) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdSetRasterState(self.handle, state);
 }
 pub fn setBlendState(self: *CommandBuffer, state: BlendState) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdSetBlendState(self.handle, state);
 }
 pub fn setBlendEnable(self: *CommandBuffer, enable: bool) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdSetBlendEnable(self.handle, enable);
 }
 pub fn setViewport(self: *CommandBuffer, vp: Viewport) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdSetViewport(self.handle, vp);
 }
 pub fn setScissor(self: *CommandBuffer, sc: Scissor) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdSetScissor(self.handle, sc);
 }
 pub fn bindDescriptorSets(self: *CommandBuffer, heap: DescriptorHeap) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdBindDescriptorSets(self.handle, heap.index);
 }
 pub fn bindTexture(self: *CommandBuffer, slot: u32, texture: TextureHandle, sampler: ?SamplerDesc) void {
@@ -135,30 +154,37 @@ pub fn deinitTexHeap(self: *CommandBuffer) void {
     }
 }
 pub fn beginRendering(self: *CommandBuffer, desc: Rendering) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdBeginRendering(self.handle, desc);
 }
 pub fn endRendering(self: *CommandBuffer) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdEndRendering(self.handle);
 }
 pub fn memCopy(self: *CommandBuffer, dst: GpuPtr, src: GpuPtr, bytes: u64) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdMemCopy(self.handle, @enumFromInt(src.vk_buffer), @enumFromInt(dst.vk_buffer), bytes);
 }
 pub fn setVertexInput(self: *CommandBuffer, bindings: []const VertexBinding, attributes: []const VertexAttribute) void {
     self.gpu.backend.cmdSetVertexInput(self.handle, bindings, attributes);
 }
 pub fn copyToTexture(self: *CommandBuffer, tex: Texture, src: GpuPtr, region: TextureRegion) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdCopyToTexture(self.handle, tex.handle, @enumFromInt(src.vk_buffer), region);
 }
 pub fn copyFromTexture(self: *CommandBuffer, tex: Texture, dst: GpuPtr, region: TextureRegion) void {
     self.gpu.backend.cmdCopyFromTexture(self.handle, tex.handle, @enumFromInt(dst.vk_buffer), region);
 }
 pub fn blitTextureHandle(self: *CommandBuffer, dst: TextureHandle, dst_rect: BlitRect, src: TextureHandle, src_rect: BlitRect, filter: Filter) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdBlitTexture(self.handle, dst, dst_rect, src, src_rect, filter);
 }
 pub fn addWaitSemaphore(self: *CommandBuffer, window_index: u32, sem: Semaphore, value: u64) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdAddWaitSemaphore(window_index, sem.handle, value);
 }
 pub fn addSignalSemaphore(self: *CommandBuffer, window_index: u32, sem: Semaphore, value: u64) void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdAddSignalSemaphore(window_index, sem.handle, value);
 }
 pub fn beginDebugLabel(self: *CommandBuffer, name: [:0]const u8, color: [4]f32) void {

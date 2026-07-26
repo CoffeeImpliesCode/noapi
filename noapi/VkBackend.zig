@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const tracy = @import("tracy");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.vk);
 const vk = @import("vk.zig");
@@ -77,7 +78,8 @@ desc_layouts: [3]vk.DescriptorSetLayout = undefined,
 pipeline_layout_graphics: vk.PipelineLayout = undefined,
 pipeline_layout_compute: vk.PipelineLayout = undefined,
 
-windows: std.ArrayListUnmanaged(Window) = std.ArrayListUnmanaged(Window).empty,
+    frames_in_flight: u32 = 2,
+    windows: std.ArrayListUnmanaged(Window) = std.ArrayListUnmanaged(Window).empty,
 
 // Buffer resource pool (no_gfx_api pattern: pooled allocs with handles)
 allocs: std.ArrayListUnmanaged(AllocInfo) = .empty,
@@ -502,7 +504,11 @@ pub fn init(options: Options) !VkBackend {
 /// Drain the pending-free list: one deviceWaitIdle, then destroy all deferred resources.
 pub fn flushPendingFrees(self: *VkBackend) void {
     if (self.pending_free.items.len == 0) return;
-    self.device.deviceWaitIdle() catch |err| log.warn("flushPendingFrees: deviceWaitIdle failed: {}", .{err});
+    {
+        const zone_dwi = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
+        defer zone_dwi.end();
+        self.device.deviceWaitIdle() catch |err| log.warn("flushPendingFrees: deviceWaitIdle failed: {}", .{err});
+    }
     for (self.pending_free.items) |pf| {
         switch (pf) {
             .buffer => |b| {
@@ -528,6 +534,8 @@ pub fn deinit(self: *VkBackend) void {
     {
         self.queue_mutex.lockUncancelable(self.io);
         defer self.queue_mutex.unlock(self.io);
+        const zone_dwi_d = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
+        defer zone_dwi_d.end();
         self.device.deviceWaitIdle() catch |err| log.warn("deinit: deviceWaitIdle failed: {}", .{err});
     }
     // Free all buffer allocations (fixes exit validation errors)
@@ -640,6 +648,8 @@ pub fn removeWindow(self: *VkBackend, index: u32) void {
         // Drain all pending queue operations before destroying this window's resources.
         // The other thread may have submissions referencing our semaphores/fences on the shared queue.
         self.queue_mutex.lockUncancelable(self.io);
+        const zone_dwi_r = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
+        defer zone_dwi_r.end();
         self.device.deviceWaitIdle() catch |err| log.warn("removeWindow: deviceWaitIdle failed: {}", .{err});
         self.queue_mutex.unlock(self.io);
         destroyWindow(self, &self.windows.items[index]);
@@ -653,13 +663,18 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
 
         // ── Handle resize ───────────────────────────────────────────
     if (win.needs_resize) {
+        const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
         self.queue_mutex.lockUncancelable(self.io);
         defer self.queue_mutex.unlock(self.io);
         if (use_swapchain_maintenance1) {
             for (win.present_done_fences.items) |f| {
+                const zone_wf_resize = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
+                defer zone_wf_resize.end();
                 _ = self.device.waitForFences(&[_]vk.Fence{f}, .true, std.math.maxInt(u64)) catch |err| log.warn("beginFrame: waitForFences failed: {}", .{err});
             }
         } else {
+            const zone_dwi_bf = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
+            defer zone_dwi_bf.end();
             self.device.deviceWaitIdle() catch |err| log.warn("beginFrame: deviceWaitIdle failed: {}", .{err});
         }
         try recreateSwapchain(self, win);
@@ -670,21 +685,33 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     const acq_fence = try self.device.createFence(&.{}, null);
     defer self.device.destroyFence(acq_fence, null);
 
-    const acq = self.device.acquireNextImageKHR(win.swapchain, std.math.maxInt(u64), .null_handle, acq_fence) catch |e| {
-        if (e == error.OutOfDateKHR) {
-            win.needs_resize = true;
-            return error.OutOfDateKHR;
-        }
-        return e;
+    const recreated = blk: {
+        const zone_acq = tracy.Zone.begin(.{ .name = "acquireImage", .src = @src(), .color = .tomato });
+        defer zone_acq.end();
+        const acq = self.device.acquireNextImageKHR(win.swapchain, std.math.maxInt(u64), .null_handle, acq_fence) catch |e| {
+            if (e == error.OutOfDateKHR) {
+                win.needs_resize = true;
+                return error.OutOfDateKHR;
+            }
+            return e;
+        };
+        win.image_index = acq.image_index;
+        _ = try self.device.waitForFences(([_]vk.Fence{acq_fence})[0..], .true, std.math.maxInt(u64));
+        break :blk acq.result == .suboptimal_khr;
     };
-    win.image_index = acq.image_index;
-    const recreated = acq.result == .suboptimal_khr;
-    _ = try self.device.waitForFences(([_]vk.Fence{acq_fence})[0..], .true, std.math.maxInt(u64));
 
     // Wait for previous frame to finish before reusing pool/fence
-    _ = try self.device.waitForFences(win.cmd_pool_ready.items[frame..][0..1], .true, std.math.maxInt(u64));
+    {
+        const zone_wf_cmd = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
+        defer zone_wf_cmd.end();
+        _ = try self.device.waitForFences(win.cmd_pool_ready.items[frame..][0..1], .true, std.math.maxInt(u64));
+    }
     try self.device.resetFences(win.cmd_pool_ready.items[frame..][0..1]);
-    _ = self.device.resetCommandPool(win.cmd_pools.items[frame], .{}) catch |err| log.warn("beginFrame: resetCommandPool failed: {}", .{err});
+    {
+        const zone_rcp = tracy.Zone.begin(.{ .name = "resetCmdPool", .src = @src(), .color = .tomato });
+        defer zone_rcp.end();
+        _ = self.device.resetCommandPool(win.cmd_pools.items[frame], .{}) catch |err| log.warn("beginFrame: resetCommandPool failed: {}", .{err});
+    }
 
     self.flushPendingFrees();
 
@@ -700,7 +727,7 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
                 .base_array_layer = 0,
                 .layer_count = 1,
             },
-            .old_layout = .present_src_khr,
+            .old_layout = .undefined,
             .new_layout = .general,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -805,19 +832,23 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
         .p_signal_semaphore_values = &signal_vals_buf,
     };
     const cb_handle = win.cmd_buffers.items[frame].handle;
-    self.queue.submit(&.{vk.SubmitInfo{
-        .p_next = @constCast(&ts_info),
-        .command_buffer_count = 1,
-        .p_command_buffers = @ptrCast(&cb_handle),
-        .wait_semaphore_count = wc,
-        .p_wait_semaphores = &wait_sems_buf,
-        .p_wait_dst_stage_mask = &stage_mask_buf,
-        .signal_semaphore_count = sc,
-        .p_signal_semaphores = &signal_sems_buf,
-    }}, win.cmd_pool_ready.items[frame]) catch |e| {
-        log.err("endFrame: queue.submit failed: {}", .{e});
-        return .{ .gpu_blocked_ns = 0 };
-    };
+    {
+        const zone_qs = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
+        defer zone_qs.end();
+        self.queue.submit(&.{vk.SubmitInfo{
+            .p_next = @constCast(&ts_info),
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&cb_handle),
+            .wait_semaphore_count = wc,
+            .p_wait_semaphores = &wait_sems_buf,
+            .p_wait_dst_stage_mask = &stage_mask_buf,
+            .signal_semaphore_count = sc,
+            .p_signal_semaphores = &signal_sems_buf,
+        }}, win.cmd_pool_ready.items[frame]) catch |e| {
+            log.err("endFrame: queue.submit failed: {}", .{e});
+            return .{ .gpu_blocked_ns = 0 };
+        };
+    }
     // Clear per-frame semaphore arrays for next use
     win.wait_sems[frame].clearRetainingCapacity();
     win.wait_values[frame].clearRetainingCapacity();
@@ -831,6 +862,8 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
             const af_present = if (use_swapchain_maintenance1) blk: {
                 const pfence = win.present_done_fences.items[frame];
                 // Wait for this frame's previous present to complete
+                const zone_wf_p = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
+                defer zone_wf_p.end();
                 _ = self.device.waitForFences(&[_]vk.Fence{pfence}, .true, std.math.maxInt(u64)) catch |err| log.warn("present: waitForFences failed: {}", .{err});
                 self.device.resetFences(&[_]vk.Fence{pfence}) catch |err| log.warn("present: resetFences failed: {}", .{err});
                 fence_info = .{ .swapchain_count = 1, .p_fences = @ptrCast(&pfence) };
@@ -849,6 +882,8 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
                 .p_swapchains = @ptrCast(&win.swapchain),
                 .p_image_indices = @ptrCast(&img_idx),
             };
+            const zone_present = tracy.Zone.begin(.{ .name = "queuePresent", .src = @src(), .color = .tomato });
+            defer zone_present.end();
             if (self.queue.presentKHR(&af_present)) |_| {
                 if (win.retired_swapchain != .null_handle) {
                     self.device.destroySwapchainKHR(win.retired_swapchain, null);
@@ -876,6 +911,8 @@ pub fn getCurrentCmdBuf(self: *VkBackend, window_index: u32) CommandBufferHandle
 pub fn waitIdle(self: *VkBackend) void {
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
+    const zone_dwi_w = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
+    defer zone_dwi_w.end();
     self.device.deviceWaitIdle() catch |err| log.warn("waitIdle: deviceWaitIdle failed: {}", .{err});
 }
 
@@ -891,11 +928,15 @@ pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) void 
         .command_buffer_count = @intCast(handles.len),
         .p_command_buffers = handles.ptr,
     };
-    self.queue.submit(&.{si}, fence) catch |err| {
-        log.warn("queueSubmit: submit failed: {}", .{err});
-        self.device.destroyFence(fence, null);
-        return;
-    };
+    {
+        const zone_qs = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
+        defer zone_qs.end();
+        self.queue.submit(&.{si}, fence) catch |err| {
+            log.warn("queueSubmit: submit failed: {}", .{err});
+            self.device.destroyFence(fence, null);
+            return;
+        };
+    }
     const cmds_copy = self.allocator.dupe(vk.CommandBuffer, handles) catch |err| {
         log.warn("queueSubmit: dupe failed: {}", .{err});
         self.device.destroyFence(fence, null);
@@ -924,7 +965,11 @@ pub fn queueSubmitSignal(self: *VkBackend, handles: []const CommandBufferHandle,
         .signal_semaphore_count = 1,
         .p_signal_semaphores = @ptrCast(&sems),
     };
-    self.queue.submit(&.{si}, .null_handle) catch |err| log.warn("queueSubmitSignal: submit failed: {}", .{err});
+    {
+        const zone_qss = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
+        defer zone_qss.end();
+        self.queue.submit(&.{si}, .null_handle) catch |err| log.warn("queueSubmitSignal: submit failed: {}", .{err});
+    }
 }
 
 pub fn commandsBegin(self: *VkBackend) !CommandBufferHandle {
@@ -965,6 +1010,8 @@ pub fn commandsEnd(self: *VkBackend, cmd: CommandBufferHandle) void {
 pub fn queueWaitIdle(self: *VkBackend) void {
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
+    const zone_qw = tracy.Zone.begin(.{ .name = "queueWait", .src = @src(), .color = .tomato });
+    defer zone_qw.end();
     self.queue.waitIdle() catch |err| log.warn("queueWaitIdle: waitIdle failed: {}", .{err});
 }
 
@@ -1421,12 +1468,16 @@ fn recreateSwapchain(self: *VkBackend, win: *Window) !void {
         // Wait on ALL per-frame present fences before destroying old swapchain.
         // Each frame's present must complete before we can safely recreate.
         for (win.present_done_fences.items) |f| {
+            const zone_wf_rs = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
+            defer zone_wf_rs.end();
             _ = self.device.waitForFences(&[_]vk.Fence{f}, .true, std.math.maxInt(u64)) catch |err| log.warn("recreateSwapchain: waitForFences failed: {}", .{err});
         }
     } else {
         // deviceWaitIdle: Khronos-recommended workaround for spec bug #1678.
         // No fence/semaphore reliably signals when the present engine is done
         // with old swapchain images. deviceWaitIdle is the only safe fallback.
+        const zone_dwi_rs = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
+        defer zone_dwi_rs.end();
         self.device.deviceWaitIdle() catch |err| log.warn("recreateSwapchain: deviceWaitIdle failed: {}", .{err});
     }
     // Destroy present semaphores
@@ -1442,6 +1493,7 @@ fn recreateSwapchain(self: *VkBackend, win: *Window) !void {
 }
 
 fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     const alloc = self.allocator;
     const old_swapchain = win.swapchain;
 
@@ -1832,11 +1884,15 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
         {
             self.queue_mutex.lockUncancelable(self.io);
             defer self.queue_mutex.unlock(self.io);
-            try self.queue.submit(&.{vk.SubmitInfo{
-                .command_buffer_count = 1,
-                .p_command_buffers = @ptrCast(&cb_handle),
-            }}, .null_handle);
-            try self.queue.waitIdle();
+            {
+                const zone_tc = tracy.Zone.begin(.{ .name = "textureUpload", .src = @src(), .color = .tomato });
+                defer zone_tc.end();
+                try self.queue.submit(&.{vk.SubmitInfo{
+                    .command_buffer_count = 1,
+                    .p_command_buffers = @ptrCast(&cb_handle),
+                }}, .null_handle);
+                try self.queue.waitIdle();
+            }
         }
     }
 

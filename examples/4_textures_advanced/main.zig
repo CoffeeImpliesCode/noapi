@@ -8,6 +8,16 @@ const noapi = @import("noapi");
 const vk = noapi.vk;
 const DescriptorPool = noapi.DescriptorPool;
 const Io = std.Io;
+pub const tracy_impl = @import("tracy_impl");
+pub const tracy = @import("tracy");
+pub const tracy_options: tracy.Options = .{
+    .on_demand = false,
+    .no_broadcast = false,
+    .only_localhost = false,
+    .only_ipv4 = false,
+    .delayed_init = false,
+    .manual_lifetime = false,
+};
 
 const volume_res: u32 = 128;
 const window_width: u32 = 1000;
