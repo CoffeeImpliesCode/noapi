@@ -78,8 +78,8 @@ desc_layouts: [3]vk.DescriptorSetLayout = undefined,
 pipeline_layout_graphics: vk.PipelineLayout = undefined,
 pipeline_layout_compute: vk.PipelineLayout = undefined,
 
-    frames_in_flight: u32 = 2,
-    windows: std.ArrayListUnmanaged(Window) = std.ArrayListUnmanaged(Window).empty,
+frames_in_flight: u32 = 2,
+windows: std.ArrayListUnmanaged(Window) = std.ArrayListUnmanaged(Window).empty,
 
 // Buffer resource pool (no_gfx_api pattern: pooled allocs with handles)
 allocs: std.ArrayListUnmanaged(AllocInfo) = .empty,
@@ -104,17 +104,17 @@ pending_free: std.ArrayList(PendingFree) = .empty,
 last_depth_image: vk.Image = .null_handle,
 last_depth_format: vk.Format = .undefined,
 
-    const TextureInfo = struct {
-        valid: bool = true,
-        image: vk.Image,
-        default_view: vk.ImageView,
-        memory: vk.DeviceMemory = .null_handle,
-        format: vk.Format,
-        width: u32 = 0,
-        height: u32 = 0,
-        depth: u32 = 1,
-        mip_levels: u32 = 1,
-    };
+const TextureInfo = struct {
+    valid: bool = true,
+    image: vk.Image,
+    default_view: vk.ImageView,
+    memory: vk.DeviceMemory = .null_handle,
+    format: vk.Format,
+    width: u32 = 0,
+    height: u32 = 0,
+    depth: u32 = 1,
+    mip_levels: u32 = 1,
+};
 
 pub const DescHeapInfo = struct {
     valid: bool = true,
@@ -143,10 +143,10 @@ pub const Window = struct {
     resize_throttle: u32 = 0,
     retired_swapchain: vk.SwapchainKHR = .null_handle,
     // Per-frame pending wait/signal semaphores (submitted with cmd buf in endFrame)
-    wait_sems: [2]std.ArrayListUnmanaged(vk.Semaphore) = .{ .empty, .empty },
-    wait_values: [2]std.ArrayListUnmanaged(u64) = .{ .empty, .empty },
-    signal_sems: [2]std.ArrayListUnmanaged(vk.Semaphore) = .{ .empty, .empty },
-    signal_values: [2]std.ArrayListUnmanaged(u64) = .{ .empty, .empty },
+    wait_sems: std.ArrayListUnmanaged(std.ArrayListUnmanaged(vk.Semaphore)) = .empty,
+    wait_values: std.ArrayListUnmanaged(std.ArrayListUnmanaged(u64)) = .empty,
+    signal_sems: std.ArrayListUnmanaged(std.ArrayListUnmanaged(vk.Semaphore)) = .empty,
+    signal_values: std.ArrayListUnmanaged(std.ArrayListUnmanaged(u64)) = .empty,
 };
 
 const SubmittedWork = struct {
@@ -261,6 +261,7 @@ const ComputePushConstants = extern struct {
 pub fn init(options: Options) !VkBackend {
     const alloc = options.allocator;
     var self = VkBackend{ .allocator = alloc, .io = options.io };
+    self.frames_in_flight = options.frames_in_flight;
     self.texture_view_cache = std.AutoHashMap(u64, vk.ImageView).init(alloc);
     self.sampler_cache = std.AutoHashMap(u64, vk.Sampler).init(alloc);
 
@@ -608,12 +609,13 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
     for (self.windows.items, 0..) |*w, i| {
         if (!w.valid) {
             log.info("addWindow: reusing tombstone slot {}", .{i});
-            w.* = Window{ .surface = surface, .extent = initial_extent, .requested_extent = initial_extent, .frames_in_flight = 2 };
+            w.* = Window{ .surface = surface, .extent = initial_extent, .requested_extent = initial_extent, .frames_in_flight = self.frames_in_flight };
+            try initPerFrameSemaphoreLists(self, w);
             try createSwapchainResources(self, w);
             try createPresentSemaphores(self, w);
             if (use_swapchain_maintenance1) {
-                try w.present_done_fences.ensureTotalCapacity(self.allocator, w.frames_in_flight);
-                for (0..w.frames_in_flight) |_| {
+                try w.present_done_fences.ensureTotalCapacity(self.allocator, self.frames_in_flight);
+                for (0..self.frames_in_flight) |_| {
                     const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
                     w.present_done_fences.appendAssumeCapacity(fence);
                 }
@@ -624,14 +626,16 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
         }
     }
     const idx = self.windows.items.len;
+    log.info("addWindow: initPerFrameSemaphoreLists", .{});
+    var win = Window{ .surface = surface, .extent = initial_extent, .requested_extent = initial_extent, .frames_in_flight = self.frames_in_flight };
+    try initPerFrameSemaphoreLists(self, &win);
     log.info("addWindow: createSwapchainResources", .{});
-    var win = Window{ .surface = surface, .extent = initial_extent, .requested_extent = initial_extent, .frames_in_flight = 2 };
     try createSwapchainResources(self, &win);
     log.info("addWindow: createPresentSemaphores", .{});
     try createPresentSemaphores(self, &win);
     if (use_swapchain_maintenance1) {
-        try win.present_done_fences.ensureTotalCapacity(self.allocator, win.frames_in_flight);
-        for (0..win.frames_in_flight) |_| {
+        try win.present_done_fences.ensureTotalCapacity(self.allocator, self.frames_in_flight);
+        for (0..self.frames_in_flight) |_| {
             const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
             win.present_done_fences.appendAssumeCapacity(fence);
         }
@@ -661,9 +665,10 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
 
-        // ── Handle resize ───────────────────────────────────────────
+    // ── Handle resize ───────────────────────────────────────────
     if (win.needs_resize) {
-        const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
+        const zone = tracy.Zone.begin(.{ .src = @src() });
+        defer zone.end();
         self.queue_mutex.lockUncancelable(self.io);
         defer self.queue_mutex.unlock(self.io);
         if (use_swapchain_maintenance1) {
@@ -800,8 +805,8 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
     wait_vals_buf[wc] = wait_val;
     stage_mask_buf[wc] = .{ .all_commands_bit = true };
     wc += 1;
-    const wait_count = @min(win.wait_sems[frame].items.len, 16 - wc);
-    for (win.wait_sems[frame].items[0..wait_count], win.wait_values[frame].items[0..wait_count], wc..) |s, v, i| {
+    const wait_count = @min(win.wait_sems.items[frame].items.len, 16 - wc);
+    for (win.wait_sems.items[frame].items[0..wait_count], win.wait_values.items[frame].items[0..wait_count], wc..) |s, v, i| {
         wait_sems_buf[i] = s;
         wait_vals_buf[i] = v;
         stage_mask_buf[i] = .{ .all_commands_bit = true };
@@ -818,8 +823,8 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
     signal_sems_buf[sc] = present_sem;
     signal_vals_buf[sc] = 0;
     sc += 1;
-    const signal_count = @min(win.signal_sems[frame].items.len, 16 - sc);
-    for (win.signal_sems[frame].items[0..signal_count], win.signal_values[frame].items[0..signal_count], sc..) |s, v, i| {
+    const signal_count = @min(win.signal_sems.items[frame].items.len, 16 - sc);
+    for (win.signal_sems.items[frame].items[0..signal_count], win.signal_values.items[frame].items[0..signal_count], sc..) |s, v, i| {
         signal_sems_buf[i] = s;
         signal_vals_buf[i] = v;
         sc += 1;
@@ -850,10 +855,10 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
         };
     }
     // Clear per-frame semaphore arrays for next use
-    win.wait_sems[frame].clearRetainingCapacity();
-    win.wait_values[frame].clearRetainingCapacity();
-    win.signal_sems[frame].clearRetainingCapacity();
-    win.signal_values[frame].clearRetainingCapacity();
+    win.wait_sems.items[frame].clearRetainingCapacity();
+    win.wait_values.items[frame].clearRetainingCapacity();
+    win.signal_sems.items[frame].clearRetainingCapacity();
+    win.signal_values.items[frame].clearRetainingCapacity();
     self.queue_counter = signal_val;
 
     if (present) |p| {
@@ -890,8 +895,8 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
                     win.retired_swapchain = .null_handle;
                 }
             } else |e| {
-                    if (e == error.OutOfDateKHR) {
-                        win.needs_resize = true;
+                if (e == error.OutOfDateKHR) {
+                    win.needs_resize = true;
                 } else {
                     log.warn("endFrame: present failed: {}", .{e});
                 }
@@ -1423,14 +1428,14 @@ pub fn cmdEndDebugLabel(self: *VkBackend, cmd: CommandBufferHandle) void {
 pub fn cmdAddWaitSemaphore(self: *VkBackend, window_index: u32, sem: SemaphoreHandle, value: u64) void {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
-    win.wait_sems[frame].append(self.allocator, sem) catch |e| log.warn("cmdAddWaitSemaphore: append failed: {}", .{e});
-    win.wait_values[frame].append(self.allocator, value) catch |e| log.warn("cmdAddWaitSemaphore: append value failed: {}", .{e});
+    win.wait_sems.items[frame].append(self.allocator, sem) catch |e| log.warn("cmdAddWaitSemaphore: append failed: {}", .{e});
+    win.wait_values.items[frame].append(self.allocator, value) catch |e| log.warn("cmdAddWaitSemaphore: append value failed: {}", .{e});
 }
 pub fn cmdAddSignalSemaphore(self: *VkBackend, window_index: u32, sem: SemaphoreHandle, value: u64) void {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
-    win.signal_sems[frame].append(self.allocator, sem) catch |e| log.warn("cmdAddSignalSemaphore: append failed: {}", .{e});
-    win.signal_values[frame].append(self.allocator, value) catch |e| log.warn("cmdAddSignalSemaphore: append value failed: {}", .{e});
+    win.signal_sems.items[frame].append(self.allocator, sem) catch |e| log.warn("cmdAddSignalSemaphore: append failed: {}", .{e});
+    win.signal_values.items[frame].append(self.allocator, value) catch |e| log.warn("cmdAddSignalSemaphore: append value failed: {}", .{e});
 }
 pub fn cmdBindDescriptorSets(self: *VkBackend, cmd: CommandBufferHandle, heap: u32) void {
     if (heap < self.desc_heaps.items.len) {
@@ -1493,7 +1498,8 @@ fn recreateSwapchain(self: *VkBackend, win: *Window) !void {
 }
 
 fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
-    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     const alloc = self.allocator;
     const old_swapchain = win.swapchain;
 
@@ -1628,6 +1634,21 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
     log.info("Per-frame resources created: {} frames", .{frames});
 }
 
+fn initPerFrameSemaphoreLists(self: *VkBackend, win: *Window) !void {
+    const alloc = self.allocator;
+    const frames = self.frames_in_flight;
+    try win.wait_sems.ensureTotalCapacity(alloc, frames);
+    try win.wait_values.ensureTotalCapacity(alloc, frames);
+    try win.signal_sems.ensureTotalCapacity(alloc, frames);
+    try win.signal_values.ensureTotalCapacity(alloc, frames);
+    for (0..frames) |_| {
+        win.wait_sems.appendAssumeCapacity(.empty);
+        win.wait_values.appendAssumeCapacity(.empty);
+        win.signal_sems.appendAssumeCapacity(.empty);
+        win.signal_values.appendAssumeCapacity(.empty);
+    }
+}
+
 fn createPresentSemaphores(self: *VkBackend, win: *Window) !void {
     const alloc = self.allocator;
     try win.present_sems.ensureTotalCapacity(alloc, win.images.items.len);
@@ -1643,10 +1664,14 @@ fn destroyWindow(self: *VkBackend, win: *Window) void {
     for (win.present_sems.items) |s| self.device.destroySemaphore(s, null);
     win.present_sems.deinit(alloc);
     win.images.deinit(alloc);
-    for (&win.wait_sems) |*l| l.deinit(alloc);
-    for (&win.wait_values) |*l| l.deinit(alloc);
-    for (&win.signal_sems) |*l| l.deinit(alloc);
-    for (&win.signal_values) |*l| l.deinit(alloc);
+    for (win.wait_sems.items) |*l| l.deinit(alloc);
+    win.wait_sems.deinit(alloc);
+    for (win.wait_values.items) |*l| l.deinit(alloc);
+    win.wait_values.deinit(alloc);
+    for (win.signal_sems.items) |*l| l.deinit(alloc);
+    win.signal_sems.deinit(alloc);
+    for (win.signal_values.items) |*l| l.deinit(alloc);
+    win.signal_values.deinit(alloc);
     if (win.swapchain != .null_handle) {
         self.device.destroySwapchainKHR(win.swapchain, null);
         win.swapchain = .null_handle;
@@ -2046,7 +2071,7 @@ pub fn samplerDescriptor(self: *VkBackend, desc: SamplerDesc) u64 {
     // Hash the sampler desc fields for cache lookup
     var h = std.hash.Wyhash.init(0);
     h.update(&[_]u8{
-        @intFromEnum(desc.min_filter), @intFromEnum(desc.mag_filter), @intFromEnum(desc.mip_filter),
+        @intFromEnum(desc.min_filter),     @intFromEnum(desc.mag_filter),     @intFromEnum(desc.mip_filter),
         @intFromEnum(desc.address_mode_u), @intFromEnum(desc.address_mode_v), @intFromEnum(desc.address_mode_w),
     });
     h.update(std.mem.asBytes(&desc.mip_lod_bias));
@@ -2211,14 +2236,22 @@ pub fn semaphoreWait(self: *VkBackend, sem: SemaphoreHandle, value: u64) void {
 
 fn isBlockCompressed(fmt: vk.Format) bool {
     return switch (fmt) {
-        .bc1_rgb_unorm_block, .bc1_rgb_srgb_block,
-        .bc1_rgba_unorm_block, .bc1_rgba_srgb_block,
-        .bc2_unorm_block, .bc2_srgb_block,
-        .bc3_unorm_block, .bc3_srgb_block,
-        .bc4_unorm_block, .bc4_snorm_block,
-        .bc5_unorm_block, .bc5_snorm_block,
-        .bc6h_ufloat_block, .bc6h_sfloat_block,
-        .bc7_unorm_block, .bc7_srgb_block,
+        .bc1_rgb_unorm_block,
+        .bc1_rgb_srgb_block,
+        .bc1_rgba_unorm_block,
+        .bc1_rgba_srgb_block,
+        .bc2_unorm_block,
+        .bc2_srgb_block,
+        .bc3_unorm_block,
+        .bc3_srgb_block,
+        .bc4_unorm_block,
+        .bc4_snorm_block,
+        .bc5_unorm_block,
+        .bc5_snorm_block,
+        .bc6h_ufloat_block,
+        .bc6h_sfloat_block,
+        .bc7_unorm_block,
+        .bc7_srgb_block,
         => true,
         else => false,
     };
