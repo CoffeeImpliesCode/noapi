@@ -93,16 +93,16 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.platformInit("3D Cube", win_width, win_height, @intCast(frames_in_flight), io, gpa);
-    app.surf.gpu = &app.gpu; // fix dangling ptr: surf.gpu captured &local_gpu before App reached final stack addr
+    var app = try common.App.init(gpa, "3D Cube", win_width, win_height, @intCast(frames_in_flight), io);
+    app.surf.gpu = app.gpu; // fix dangling ptr: surf.gpu captured &local_gpu before App reached final stack addr
     defer app.deinit();
     try app.sdl_win.show();
     const win_id = try app.sdl_win.getId();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/cube_vert.spv", .vertex, "main", "cube_vert");
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/cube_vert.spv", .vertex, "main", "cube_vert");
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/cube_frag.spv", .fragment, "main", "cube_frag");
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/cube_frag.spv", .fragment, "main", "cube_frag");
     defer frag_shader.destroy();
 
     // ── Depth texture ──────────────────────────────────────

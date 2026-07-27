@@ -40,14 +40,14 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.platformInit("Indirect Triangles", window_width, window_height, frames_in_flight, io, gpa);
+    var app = try common.App.init(gpa, "Indirect Triangles", window_width, window_height, frames_in_flight, io);
     defer app.deinit();
     try app.sdl_win.show();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/indirect_tri_vert.spv", .vertex, "main", "indirect_tri_vert");
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/indirect_tri_vert.spv", .vertex, "main", "indirect_tri_vert");
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/indirect_tri_frag.spv", .fragment, "main", "indirect_tri_frag");
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/indirect_tri_frag.spv", .fragment, "main", "indirect_tri_frag");
     defer frag_shader.destroy();
 
     // ── Vertex buffer (single triangle shared by all draws) ─

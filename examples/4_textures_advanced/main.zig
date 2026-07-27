@@ -21,14 +21,14 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.platformInit("noapi textures_advanced", window_width, window_height, 2, io, gpa);
+    var app = try common.App.init(gpa, "noapi textures_advanced", window_width, window_height, 2, io);
     defer app.deinit();
     try app.sdl_win.show();
 
     // ── Shaders ────────────────────────────────────────────
-    const cloud_vert = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/cloud_vert.spv", .vertex, "main", "cloud_vert");
+    const cloud_vert = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/cloud_vert.spv", .vertex, "main", "cloud_vert");
     defer cloud_vert.destroy();
-    const cloud_frag = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/cloud_frag.spv", .fragment, "main", "cloud_frag");
+    const cloud_frag = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/cloud_frag.spv", .fragment, "main", "cloud_frag");
     defer cloud_frag.destroy();
 
     // ── 3D cloud texture ──────────────────────────────────
@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
     generateCloudVolume(cloud_data);
 
     // Create 3D texture on GPU
-    var cloud_tex = try noapi.Texture.OwnedTexture.allocAndCreate(&app.gpu, .{
+    var cloud_tex = try noapi.Texture.OwnedTexture.allocAndCreate(app.gpu, .{
         .type = .@"3d",
         .dimensions = .{ volume_res, volume_res, volume_res },
         .format = .r8_unorm,
@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Upload cloud data via staging buffer
     {
-        const staging = try common.gpuCreate(&app.gpu, u8, cloud_data, 16);
+        const staging = try common.gpuCreate(app.gpu, u8, cloud_data, 16);
         defer app.gpu.gpuFree(staging);
 
         var cmd = try app.gpu.commandsBegin();
@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ── Descriptor pool ────────────────────────────────────
-    var pool = try DescriptorPool.init(&app.gpu, 1, 0, 1);
+    var pool = try DescriptorPool.init(app.gpu, 1, 0, 1);
     defer pool.deinit();
 
     _ = pool.allocTexture(cloud_tex.texture.handle, app.gpu.samplerDescriptor(.{

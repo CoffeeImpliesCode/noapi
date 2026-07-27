@@ -33,90 +33,89 @@ pub const Vec3 = [3]f32;
 pub const Mat4 = [16]f32;
 
 // ── App ──────────────────────────────────────────────────
-/// Holds the full platform state created by platformInit.
+/// Holds the full platform state created by App.init.
+/// Gpu is heap-allocated so the *Gpu pointer stored in Surface stays stable.
 pub const App = struct {
     sdl_win: sdl3.video.Window,
-    gpu: noapi.Gpu,
+    gpu: *noapi.Gpu,
     surf: noapi.Surface,
     gpa: std.mem.Allocator,
     io: Io,
     width: u32,
     height: u32,
 
+    pub fn init(allocator: std.mem.Allocator, comptime app_name: [:0]const u8, width: u32, height: u32, frames_in_flight: u5, io: Io) !App {
+        // SDL3
+        try sdl3.hints.set(.video_driver, "wayland");
+        try sdl3.hints.set(.render_driver, "vulkan");
+        try sdl3.init(.{ .video = true, .events = true });
+        errdefer sdl3.quit(.{ .video = true, .events = true });
+
+        const win = try sdl3.video.Window.init(app_name, width, height, .{
+            .resizable = true,
+            .high_pixel_density = true,
+        });
+        errdefer win.deinit();
+        try win.show();
+
+        // Vulkan loader via SDL3
+        try sdl3.vulkan.loadLibrary(null);
+        const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
+        const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
+        const exts_copy = try allocator.dupe([*:0]const u8, sdl_exts);
+        exts_owned = exts_copy;
+
+        // GPU — heap-allocated so *Gpu pointer is stable across App moves
+        const gpu = try allocator.create(noapi.Gpu);
+        errdefer allocator.destroy(gpu);
+        gpu.* = try noapi.Gpu.init(.{
+            .frames_in_flight = frames_in_flight,
+            .app_name = app_name,
+            .validation = true,
+            .loader = .{
+                .get_instance_proc_addr = @ptrCast(get_proc_addr),
+                .get_instance_extensions = &getExts,
+            },
+            .io = io,
+            .allocator = allocator,
+        });
+        errdefer {
+            gpu.deinit();
+            allocator.destroy(gpu);
+        }
+
+        // Surface — pass gpu directly (already a stable heap pointer)
+        const sdl_surface = try sdl3.vulkan.Surface.init(
+            win,
+            @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
+            null,
+        );
+        const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
+        const surf = try noapi.Surface.init(gpu, surface, .{
+            .extent = .{ .width = width, .height = height },
+        });
+
+        return App{
+            .gpu = gpu,
+            .surf = surf,
+            .sdl_win = win,
+            .gpa = allocator,
+            .io = io,
+            .width = width,
+            .height = height,
+        };
+    }
+
     pub fn deinit(self: *App) void {
         self.surf.deinit();
         self.gpu.deinit();
+        self.gpa.destroy(self.gpu);
         self.sdl_win.deinit();
         sdl3.quit(.{ .video = true, .events = true });
         if (exts_owned) |e| self.gpa.free(e);
         exts_owned = null;
     }
 };
-
-/// Initialize SDL3, Vulkan loader, Gpu, and Surface.
-/// Call `app.deinit()` to clean up.
-pub fn platformInit(
-    comptime app_name: [:0]const u8,
-    width: u32,
-    height: u32,
-    frames_in_flight: u5,
-    io: Io,
-    gpa: std.mem.Allocator,
-) !App {
-    // SDL3
-    try sdl3.hints.set(.video_driver, "wayland");
-    try sdl3.hints.set(.render_driver, "vulkan");
-    try sdl3.init(.{ .video = true, .events = true });
-    errdefer sdl3.quit(.{ .video = true, .events = true });
-
-    var app: App = undefined;
-
-    app.sdl_win = try sdl3.video.Window.init(app_name, width, height, .{
-        .resizable = true,
-        .high_pixel_density = true,
-    });
-    errdefer app.sdl_win.deinit();
-    try app.sdl_win.show();
-
-    // Vulkan loader via SDL3
-    try sdl3.vulkan.loadLibrary(null);
-    const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
-    const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
-    const exts_copy = try gpa.dupe([*:0]const u8, sdl_exts);
-    exts_owned = exts_copy;
-
-    // GPU — assign directly into app so &app.gpu is stable
-    app.gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = frames_in_flight,
-        .app_name = app_name,
-        .validation = true,
-        .loader = .{
-            .get_instance_proc_addr = @ptrCast(get_proc_addr),
-            .get_instance_extensions = &getExts,
-        },
-        .io = io,
-        .allocator = gpa,
-    });
-    errdefer app.gpu.deinit();
-
-    // Surface — use &app.gpu so the *Gpu pointer points to the struct field
-    const sdl_surface = try sdl3.vulkan.Surface.init(
-        app.sdl_win,
-        @ptrFromInt(@intFromEnum(app.gpu.instanceHandle())),
-        null,
-    );
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    app.surf = try noapi.Surface.init(&app.gpu, surface, .{
-        .extent = .{ .width = width, .height = height },
-    });
-
-    app.gpa = gpa;
-    app.io = io;
-    app.width = width;
-    app.height = height;
-
-    return app;
-}
 
 // ── 3D Vector math ───────────────────────────────────────
 

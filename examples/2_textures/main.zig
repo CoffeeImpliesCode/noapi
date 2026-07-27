@@ -20,15 +20,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.platformInit("noapi 2_textures", 800, 600, 2, io, gpa);
+    var app = try common.App.init(gpa, "noapi 2_textures", 800, 600, 2, io);
     defer app.deinit();
     try app.sdl_win.show();
     win_id = try app.sdl_win.getId();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/tex_vert.spv", .vertex, "main", "tex_vert");
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/tex_vert.spv", .vertex, "main", "tex_vert");
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/tex_frag.spv", .fragment, "main", "tex_frag");
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/tex_frag.spv", .fragment, "main", "tex_frag");
     defer frag_shader.destroy();
 
     // ── Vertex + index data ────────────────────────────────
@@ -76,10 +76,10 @@ pub fn main(init: std.process.Init) !void {
     );
 
     // Staging buffers for texture upload
-    const staging_a = try common.gpuCreate(&app.gpu, u8, pixels_a, 64);
+    const staging_a = try common.gpuCreate(app.gpu, u8, pixels_a, 64);
     defer app.gpu.gpuFree(staging_a);
 
-    const staging_b = try common.gpuCreate(&app.gpu, u8, pixels_b, 64);
+    const staging_b = try common.gpuCreate(app.gpu, u8, pixels_b, 64);
     defer app.gpu.gpuFree(staging_b);
 
     // Create GPU textures
@@ -88,9 +88,9 @@ pub fn main(init: std.process.Init) !void {
         .format = .rgba8_unorm,
         .usage = .{ .sampled = true },
     };
-    var tex_a = try noapi.Texture.create(&app.gpu, tex_desc);
+    var tex_a = try noapi.Texture.create(app.gpu, tex_desc);
     defer tex_a.destroy();
-    var tex_b = try noapi.Texture.create(&app.gpu, tex_desc);
+    var tex_b = try noapi.Texture.create(app.gpu, tex_desc);
     defer tex_b.destroy();
 
     // ── Render state ───────────────────────────────────────

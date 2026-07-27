@@ -20,15 +20,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.platformInit("1_triangle", start_width, start_height, frames_in_flight, io, gpa);
+    var app = try common.App.init(gpa, "1_triangle", start_width, start_height, frames_in_flight, io);
     defer app.deinit();
     try app.sdl_win.show();
     const win_id = try app.sdl_win.getId();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/triangle_vert.spv", .vertex, "main", "triangle_vert");
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/triangle_vert.spv", .vertex, "main", "triangle_vert");
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/triangle_frag.spv", .fragment, "main", "triangle_frag");
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/triangle_frag.spv", .fragment, "main", "triangle_frag");
     defer frag_shader.destroy();
 
     // ── Timing ─────────────────────────────────────────────

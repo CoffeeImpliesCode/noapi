@@ -36,71 +36,36 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    // try sdl3.hints.set(.video_driver, "wayland");
-    try sdl3.hints.set(.render_driver, "vulkan");
-    try sdl3.init(.{ .video = true, .events = true });
-    defer sdl3.quit(.{ .video = true, .events = true });
-
-    const sdl_win = try sdl3.video.Window.init("Deferred Shading — G-buffer: Albedo", start_width, start_height, .{
-        .resizable = true,
-        .high_pixel_density = true,
-    });
-    try sdl_win.show();
-
-    // ── Vulkan loader via SDL3 ───────────────────────────
-    try sdl3.vulkan.loadLibrary(null);
-    const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
-
-    const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
-    const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
-    exts_copy_global = exts_copy;
-
-    // ── GPU init ───────────────────────────────────────────
-    var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = frames_in_flight,
-        .app_name = "7_deferred_async_load",
-        .validation = true,
-        .loader = .{
-            .get_instance_proc_addr = @ptrCast(get_proc_addr),
-            .get_instance_extensions = &getExts,
-        },
-        .io = io,
-        .allocator = gpa,
-    });
-    defer gpu.deinit();
-
-    // ── Surface ────────────────────────────────────────────
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = start_width, .height = start_height } });
-    defer surf.deinit();
+    var app = try common.App.init(gpa, "7_deferred_async_load", start_width, start_height, frames_in_flight, io);
+    defer app.deinit();
+    try app.sdl_win.show();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_gbuffer = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/gbuffer_vert.spv", .vertex, "main", "gbuffer_vert");
+    const vert_gbuffer = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/gbuffer_vert.spv", .vertex, "main", "gbuffer_vert");
     defer vert_gbuffer.destroy();
-    const frag_gbuffer = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/gbuffer_frag.spv", .fragment, "main", "gbuffer_frag");
+    const frag_gbuffer = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/gbuffer_frag.spv", .fragment, "main", "gbuffer_frag");
     defer frag_gbuffer.destroy();
-    const vert_final = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/final_pass_vert.spv", .vertex, "main", "final_pass_vert");
+    const vert_final = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/final_pass_vert.spv", .vertex, "main", "final_pass_vert");
     defer vert_final.destroy();
-    const frag_final = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/final_pass_frag.spv", .fragment, "main", "final_pass_frag");
+    const frag_final = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/final_pass_frag.spv", .fragment, "main", "final_pass_frag");
     defer frag_final.destroy();
 
     // ── Descriptor pool ─────────────────────────────────────
-    var pool = try DescriptorPool.init(&gpu, 8, 0, 8);
+    var pool = try DescriptorPool.init(app.gpu, 8, 0, 8);
     defer pool.deinit();
 
     // Create a default 1x1 white texture
-    const default_tex = try createSolidColorTexture(&gpu, &[_]u8{ 255, 255, 255, 255 });
-    defer gpu.textureDestroy(default_tex.handle);
+    const default_tex = try createSolidColorTexture(app.gpu, &[_]u8{ 255, 255, 255, 255 });
+    defer app.gpu.textureDestroy(default_tex.handle);
 
     // Create a sampler handle (shared across all allocTexture calls)
-    const samp_handle = gpu.samplerDescriptor(.{ .max_anisotropy = 1.0 });
+    const samp_handle = app.gpu.samplerDescriptor(.{ .max_anisotropy = 1.0 });
 
     // Allocate default texture at slot 3
     _ = pool.allocTexture(default_tex.handle, samp_handle, .@"2d");
 
     // ── Load environment map ──────────────────────────────────
-    const env_map_idx_val = try loadEnvMap(gpa, io, &gpu, &pool, samp_handle);
+    const env_map_idx_val = try loadEnvMap(gpa, io, app.gpu, &pool, samp_handle);
     env_map_idx = env_map_idx_val;
 
     // ── Upload geometry (cube) ──────────────────────────────
@@ -112,21 +77,17 @@ pub fn main(init: std.process.Init) !void {
         gpa.free(cube_data.indices);
     }
 
-    const cube_pos_gpu = try gpu.gpuMalloc(cube_data.positions.len * @sizeOf([4]f32), 64, .default);
-    defer gpu.gpuFree(cube_pos_gpu);
-    @memcpy(cube_pos_gpu.cpu[0 .. cube_data.positions.len * @sizeOf([4]f32)], std.mem.sliceAsBytes(cube_data.positions));
+    const cube_pos_gpu = try common.gpuCreate(app.gpu, [4]f32, cube_data.positions, 64);
+    defer app.gpu.gpuFree(cube_pos_gpu);
 
-    const cube_norm_gpu = try gpu.gpuMalloc(cube_data.normals.len * @sizeOf([4]f32), 64, .default);
-    defer gpu.gpuFree(cube_norm_gpu);
-    @memcpy(cube_norm_gpu.cpu[0 .. cube_data.normals.len * @sizeOf([4]f32)], std.mem.sliceAsBytes(cube_data.normals));
+    const cube_norm_gpu = try common.gpuCreate(app.gpu, [4]f32, cube_data.normals, 64);
+    defer app.gpu.gpuFree(cube_norm_gpu);
 
-    const cube_uv_gpu = try gpu.gpuMalloc(cube_data.uvs.len * @sizeOf([2]f32), 64, .default);
-    defer gpu.gpuFree(cube_uv_gpu);
-    @memcpy(cube_uv_gpu.cpu[0 .. cube_data.uvs.len * @sizeOf([2]f32)], std.mem.sliceAsBytes(cube_data.uvs));
+    const cube_uv_gpu = try common.gpuCreate(app.gpu, [2]f32, cube_data.uvs, 64);
+    defer app.gpu.gpuFree(cube_uv_gpu);
 
-    const cube_idx_gpu = try gpu.gpuMalloc(cube_data.indices.len * @sizeOf(u32), 64, .default);
-    defer gpu.gpuFree(cube_idx_gpu);
-    @memcpy(cube_idx_gpu.cpu[0 .. cube_data.indices.len * @sizeOf(u32)], std.mem.sliceAsBytes(cube_data.indices));
+    const cube_idx_gpu = try common.gpuCreate(app.gpu, u32, cube_data.indices, 64);
+    defer app.gpu.gpuFree(cube_idx_gpu);
 
     // ── Fullscreen quad ─────────────────────────────────────
     const fsq = createFullscreenQuad(gpa);
@@ -135,13 +96,11 @@ pub fn main(init: std.process.Init) !void {
         gpa.free(fsq.indices);
     }
 
-    const fsq_vert_gpu = try gpu.gpuMalloc(fsq.vertices.len * @sizeOf(FullscreenVertex), 64, .default);
-    defer gpu.gpuFree(fsq_vert_gpu);
-    @memcpy(fsq_vert_gpu.cpu[0 .. fsq.vertices.len * @sizeOf(FullscreenVertex)], std.mem.sliceAsBytes(fsq.vertices));
+    const fsq_vert_gpu = try common.gpuCreate(app.gpu, FullscreenVertex, fsq.vertices, 64);
+    defer app.gpu.gpuFree(fsq_vert_gpu);
 
-    const fsq_idx_gpu = try gpu.gpuMalloc(fsq.indices.len * @sizeOf(u32), 64, .default);
-    defer gpu.gpuFree(fsq_idx_gpu);
-    @memcpy(fsq_idx_gpu.cpu[0 .. fsq.indices.len * @sizeOf(u32)], std.mem.sliceAsBytes(fsq.indices));
+    const fsq_idx_gpu = try common.gpuCreate(app.gpu, u32, fsq.indices, 64);
+    defer app.gpu.gpuFree(fsq_idx_gpu);
 
     // ── G-buffer textures ───────────────────────────────────
     var window_w: i32 = start_width;
@@ -150,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     var gb_normal: noapi.Texture.OwnedTexture = undefined;
     var gb_mr: noapi.Texture.OwnedTexture = undefined;
     var gb_depth: noapi.Texture.OwnedTexture = undefined;
-    try createGbufferTextures(&gpu, &pool, @intCast(window_w), @intCast(window_h), &gb_albedo, &gb_normal, &gb_mr, &gb_depth, samp_handle);
+    try createGbufferTextures(app.gpu, &pool, @intCast(window_w), @intCast(window_h), &gb_albedo, &gb_normal, &gb_mr, &gb_depth, samp_handle);
     defer {
         gb_albedo.freeAndDestroy();
         gb_normal.freeAndDestroy();
@@ -209,11 +168,11 @@ pub fn main(init: std.process.Init) !void {
     const fsq_push_size = @sizeOf(FsqFragData);
 
     // Persistent push-constant buffer (allocated once, reused each frame)
-    const push_buf = try gpu.gpuMalloc(total_size + fsq_push_size, 64, .default);
-    defer gpu.gpuFree(push_buf);
+    const push_buf = try app.gpu.gpuMalloc(total_size + fsq_push_size, 64, .default);
+    defer app.gpu.gpuFree(push_buf);
 
     // ── Render loop ────────────────────────────────────────
-    const win_id = try sdl_win.getId();
+    const win_id = try app.sdl_win.getId();
     var should_close = false;
     // ── FPS counter ─────────────────────────────────────────
     var fps_timer: u64 = sdl3.timer.getPerformanceCounter();
@@ -235,17 +194,17 @@ pub fn main(init: std.process.Init) !void {
                         const names = [_][*:0]const u8{ "Albedo", "Normal", "Metallic/Roughness", "Shaded" };
                         var buf: [128]u8 = undefined;
                         const title = std.fmt.bufPrintZ(&buf, "Deferred Shading — {s}", .{names[selected_texture_type]}) catch unreachable;
-                        sdl_win.setTitle(title) catch unreachable;
+                        app.sdl_win.setTitle(title) catch unreachable;
                     }
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (we.id == win_id) app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
                 },
                 else => {},
             }
         }
 
-        const flags = sdl_win.getFlags();
+        const flags = app.sdl_win.getFlags();
         if (flags.minimized) {
             sdl3.timer.delayMilliseconds(16);
             continue;
@@ -253,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
 
         // ── Delta time ─────────────────────────────────────
         // DIAG: check device on first frame
-        if (fps_frames == 0) try gpu.waitIdle();
+        if (fps_frames == 0) try app.gpu.waitIdle();
 
         // ── FPS output ──────────────────────────────────────
         fps_frames += 1;
@@ -268,23 +227,23 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Render frame ────────────────────────────────────
-        _ = surf.beginFrame() catch |e| {
+        _ = app.surf.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
         };
 
         // ── Recreate g-buffer if surface size changed ──────
-        const surface_size = surf.surfaceSize();
+        const surface_size = app.surf.surfaceSize();
         if (surface_size.width != window_w or surface_size.height != window_h) {
             window_w = @as(i32, @intCast(surface_size.width));
             window_h = @as(i32, @intCast(surface_size.height));
-            try gpu.waitIdle();
+            try app.gpu.waitIdle();
 
             gb_albedo.freeAndDestroy();
             gb_normal.freeAndDestroy();
             gb_mr.freeAndDestroy();
             gb_depth.freeAndDestroy();
-            try createGbufferTextures(&gpu, &pool, @intCast(window_w), @intCast(window_h), &gb_albedo, &gb_normal, &gb_mr, &gb_depth, samp_handle);
+            try createGbufferTextures(app.gpu, &pool, @intCast(window_w), @intCast(window_h), &gb_albedo, &gb_normal, &gb_mr, &gb_depth, samp_handle);
         }
 
         // ── Camera ──────────────────────────────────────────
@@ -292,7 +251,7 @@ pub fn main(init: std.process.Init) !void {
         const view = common.lookAt(.{ 3.0, 2.0, 3.0 }, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
         const proj = common.perspective(59.0 * std.math.pi / 180.0, aspect, 0.1, 1000.0);
 
-        var cmd = surf.commandsBegin();
+        var cmd = app.surf.commandsBegin();
 
         // ── Pass 1: G-buffer ────────────────────────────────
         cmd.beginRendering(.{
@@ -359,7 +318,7 @@ pub fn main(init: std.process.Init) !void {
         cmd.barrier(.{ .color_output = true }, .{ .fragment = true }, .{});
 
         // ── Pass 2: Deferred shading ────────────────────────
-        const sc = surf.currentImage();
+        const sc = app.surf.currentImage();
         cmd.beginRendering(.{
             .color_attachments = &.{
                 .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{ 0.7, 0.7, 0.7, 1.0 } },
@@ -421,10 +380,10 @@ pub fn main(init: std.process.Init) !void {
 
         cmd.endRendering();
 
-        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
     }
 
-    try gpu.waitIdle();
+    try app.gpu.waitIdle();
 }
 
 // ── Geometry helpers ──────────────────────────────────────────
@@ -672,8 +631,4 @@ fn loadEnvMap(gpa: std.mem.Allocator, io: Io, gpu: *noapi.Gpu, pool: *Descriptor
     return idx;
 }
 
-var exts_copy_global: []const [*:0]const u8 = &.{};
 
-fn getExts() []const [*:0]const u8 {
-    return exts_copy_global;
-}

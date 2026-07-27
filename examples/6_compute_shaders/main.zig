@@ -24,21 +24,21 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.platformInit("6_compute_shaders", start_width, start_height, frames_in_flight, io, gpa);
+    var app = try common.App.init(gpa, "6_compute_shaders", start_width, start_height, frames_in_flight, io);
     defer app.deinit();
     try app.sdl_win.show();
     const win_id = try app.sdl_win.getId();
 
     // ── Shaders ────────────────────────────────────────────
-    const comp_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/compute_comp.spv", .compute, "main", "compute");
+    const comp_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/compute_comp.spv", .compute, "main", "compute");
     defer comp_shader.destroy();
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/fullscreen_quad_vert.spv", .vertex, "main", "fullscreen_quad");
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/fullscreen_quad_vert.spv", .vertex, "main", "fullscreen_quad");
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/tex_sample_frag.spv", .fragment, "main", "tex_sample");
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/tex_sample_frag.spv", .fragment, "main", "tex_sample");
     defer frag_shader.destroy();
 
     // ── Descriptor pool ────────────────────────────────────
-    var pool = try DescriptorPool.init(&app.gpu, 1, 1, 1);
+    var pool = try DescriptorPool.init(app.gpu, 1, 1, 1);
     defer pool.deinit();
 
     // ── Compute output texture (storage + sampled) ─────────
