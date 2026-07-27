@@ -10,7 +10,11 @@ pub fn build(b: *std.Build) void {
     const enable_tracy = b.option(bool, "enable-tracy", "Enable Tracy profiler") orelse true;
     const tracy_impl = if (enable_tracy) tracy.module("tracy_impl_enabled") else tracy.module("tracy_impl_disabled");
 
-    // ── noapi module ──────────────────────────────────────
+    // zig-cov coverage (see zig-cov README): zig-gate --cov passes these
+    const coverage = b.option(bool, "coverage", "Enable zig-cov") orelse false;
+    const cov_rt = b.option([]const u8, "coverage-rt", "zig-cov-rt path") orelse null;
+
+    // ── noapi module ───────────────────────────────
     const mod = b.addModule("noapi", .{
         .root_source_file = b.path("noapi/root.zig"),
         .target = target,
@@ -40,7 +44,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // ── noapi-test executable ─────────────────────────────
+    // ── noapi-test executable ────────────────────────────
     const exe = b.addExecutable(.{
         .name = "noapi-test",
         .root_module = b.createModule(.{
@@ -93,7 +97,7 @@ pub fn build(b: *std.Build) void {
     run_1_triangle_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_1_triangle_cmd.addArgs(args);
 
-    // ── 2_textures example ────────────────────────────────
+    // ── 2_textures example ─────────────────────────────
     const tex_exe = b.addExecutable(.{
         .name = "2_textures",
         .root_module = b.createModule(.{
@@ -255,10 +259,23 @@ pub fn build(b: *std.Build) void {
     run_7_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_7_cmd.addArgs(args);
 
-    // ── Tests ─────────────────────────────────────────────
+    // ── Tests ─────────────────────────────────
     const mod_tests = b.addTest(.{ .root_module = mod });
+    if (coverage) {
+        mod_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
+        mod_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1
+        mod_tests.root_module.link_libc = true; // atexit handler writes the .zcov
+        if (cov_rt) |p| mod_tests.root_module.addObjectFile(.{ .cwd_relative = p });
+    }
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const test_step = b.step("test", "Run noapi tests");
     test_step.dependOn(&run_mod_tests.step);
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate documentation");
+    docs_step.dependOn(&install_docs.step);
 }

@@ -24,4 +24,6 @@ pub const Hazard = packed struct {
     depth_stencil: bool = false,
 };
 
-test { std.testing.refAllDecls(@This()); }
+test {
+    std.testing.refAllDecls(@This());
+}

@@ -1,3 +1,4 @@
+// zlint-disable unused-decls -- public API type, re-exported via root.zig
 //! Rasterization state object.
 const std = @import("std");
 const RasterState = @This();

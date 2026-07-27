@@ -44,6 +44,23 @@ pub const VkBackend = @This();
 // (~10x faster, requires extension + driver support).
 const use_swapchain_maintenance1 = false;
 
+// Tracy GPU zones: u16 wire query ids. mr_gpu encodes the frame in the high byte
+// so ids are unique across frames. The server resolves GpuTime events through a
+// per-id slot array (ctx->query[id]); ids restarting every frame would collide
+// across windows. 256 slots per frame (index: u8).
+const TracyQueryId = packed struct(u16) {
+    pub const cap: u16 = 256; // slots 0..255 per frame
+    frame: u8,
+    index: u8,
+};
+
+// Calibrated timestamp domains: CPU (CLOCK_MONOTONIC_RAW, matches TracyVulkan.hpp
+// on Linux) + GPU device domain (the clock vkCmdWriteTimestamp queries use).
+const tracy_calib_info = [2]vk.CalibratedTimestampInfoKHR{
+    .{ .time_domain = .clock_monotonic_raw_khr },
+    .{ .time_domain = .device_khr },
+};
+
 // Opaque handle types that the backend uses for resources
 pub const CommandBufferHandle = vk.CommandBuffer;
 pub const ShaderHandle = vk.ShaderEXT;
@@ -105,13 +122,20 @@ last_depth_image: vk.Image = .null_handle,
 last_depth_format: vk.Format = .undefined,
 
 // Debug feature flags (set at creation via Options)
-enable_debug_utils: bool = false,       // VK_EXT_debug_utils object naming + labels
-enable_nv_checkpoints: bool = false,    // VK_NV_device_diagnostic_checkpoints
-enable_nv_diagnostics: bool = false,    // VK_NV_device_diagnostics_config
-enable_device_fault: bool = false,      // VK_EXT_device_fault
+enable_debug_utils: bool = false, // VK_EXT_debug_utils object naming + labels
+enable_nv_checkpoints: bool = false, // VK_NV_device_diagnostic_checkpoints
+enable_nv_diagnostics: bool = false, // VK_NV_device_diagnostics_config
+enable_device_fault: bool = false, // VK_EXT_device_fault
 
 // NVIDIA diagnostic checkpoint counter (monotonic)
 checkpoint_counter: u32 = 0,
+
+// Tracy GPU profiling (Vulkan timestamp queries; gated: tracy.enabled and Options.timestamp_queries
+// and device capability checks in init; false means zones and pools are all no-ops)
+timestamp_queries: bool = false,
+timestamp_period: f32 = 0,
+tracy_queue: ?tracy.GpuQueue = null,
+tracy_prev_calib_cpu: u64 = 0,
 
 const TextureInfo = struct {
     valid: bool = true,
@@ -138,6 +162,7 @@ pub const Window = struct {
     swapchain_format: vk.Format = .b8g8r8a8_srgb,
     extent: Extent2D = .{}, // actual swapchain image extent
     requested_extent: Extent2D = .{}, // pending resize request
+    present_mode: vk.PresentModeKHR = .fifo_khr,
     images: std.ArrayListUnmanaged(vk.Image) = .empty,
     views: std.ArrayListUnmanaged(vk.ImageView) = .empty,
     present_sems: std.ArrayListUnmanaged(vk.Semaphore) = .empty,
@@ -145,9 +170,17 @@ pub const Window = struct {
     cmd_pools: std.ArrayListUnmanaged(vk.CommandPool) = .empty,
     cmd_buffers: std.ArrayListUnmanaged(vk.CommandBufferProxy) = .empty,
     cmd_pool_ready: std.ArrayListUnmanaged(vk.Fence) = .empty,
+    // Per-frame Tracy GPU query pools (timestamp queries); stay empty unless profiling enabled
+    tracy_query_pools: std.ArrayListUnmanaged(vk.QueryPool) = .empty,
+    tracy_queries: std.ArrayListUnmanaged(u16) = .empty,
+    // Cached Tracy source-location ids for per-frame GPU zones, keyed by swapchain
+    // image index (bounded: alloc'd srclocs are never freed by the profiler).
+    tracy_img_srclocs: std.ArrayListUnmanaged(u64) = .empty,
     present_done_fences: std.ArrayListUnmanaged(vk.Fence) = if (use_swapchain_maintenance1) .empty else undefined,
     frame_index: u32 = 0,
     image_index: u32 = 0,
+    // CPU nanoseconds spent blocked on the GPU this frame (acquire/present/fence waits)
+    slop_ns: u64 = 0,
     needs_resize: bool = false,
     resize_throttle: u32 = 0,
     retired_swapchain: vk.SwapchainKHR = .null_handle,
@@ -163,17 +196,18 @@ const SubmittedWork = struct {
     fence: vk.Fence,
 };
 
-    pub const Options = struct {
-        app_name: [:0]const u8 = "noapi",
-        validation: bool = false,
-        frames_in_flight: u32 = 2,
-        loader: Loader = .{},
-        io: std.Io,
-        allocator: std.mem.Allocator = std.heap.page_allocator,
-        enable_debug_utils: bool = false,
-        enable_nv_checkpoints: bool = false,
-        enable_nv_diagnostics: bool = false,
-        enable_device_fault: bool = false,
+pub const Options = struct {
+    app_name: [:0]const u8 = "noapi",
+    validation: bool = false,
+    frames_in_flight: u32 = 2,
+    loader: Loader = .{},
+    io: std.Io,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    enable_debug_utils: bool = false,
+    enable_nv_checkpoints: bool = false,
+    enable_nv_diagnostics: bool = false,
+    enable_device_fault: bool = false,
+    timestamp_queries: bool = false,
 
     pub const Loader = struct {
         get_instance_proc_addr: ?vk.PfnGetInstanceProcAddr = null,
@@ -184,6 +218,7 @@ const SubmittedWork = struct {
 const DeviceFeatures = struct {
     vk10: vk.PhysicalDeviceFeatures2 = .{ .features = .{
         .shader_int_64 = .true,
+        .shader_float_64 = .true,
         .sampler_anisotropy = .true,
     } },
     vk11: vk.PhysicalDeviceVulkan11Features = .{ .shader_draw_parameters = .true },
@@ -195,8 +230,9 @@ const DeviceFeatures = struct {
     diagnostics_config: void = undefined,
     device_fault: void = undefined,
 
-    fn init(self: *DeviceFeatures) void {
+    fn init(self: *DeviceFeatures, timestamp_queries: bool) void {
         self.vk10.features.shader_int_64 = .true;
+        self.vk10.features.shader_float_64 = .true;
         self.vk10.features.sampler_anisotropy = .true;
         self.vk11.shader_draw_parameters = .true;
         self.vk11.p_next = @constCast(&self.vk12);
@@ -215,6 +251,7 @@ const DeviceFeatures = struct {
             .buffer_device_address = .true,
             .scalar_block_layout = .true,
             .draw_indirect_count = .true,
+            .host_query_reset = if (timestamp_queries) .true else .false,
             .p_next = @constCast(&self.descriptor_buffer),
         };
         self.descriptor_buffer = .{ .descriptor_buffer = .true, .p_next = @constCast(&self.shader_object) };
@@ -275,25 +312,37 @@ const GraphicsPushConstants = extern struct {
     vert_data: u64,
     frag_data: u64,
     indirect_data: u64,
+    screen: [2]f32, // framebuffer size (px); @sizeOf must match PushData
+    scene_bda: u64, // the drawable bag (V1b); @sizeOf must match PushData
+    perm_bda: u64, // the sorted permutation (V1b); @sizeOf must match PushData
 };
 const ComputePushConstants = extern struct {
     compute_data: u64,
 };
 
-pub fn init(options: Options) !VkBackend {
+pub fn init(options: Options) !*VkBackend {
+    const t_start = std.Io.Timestamp.now(options.io, .real);
     const alloc = options.allocator;
-    var self: VkBackend = .{ .allocator = alloc, .io = options.io };
+    // Gates everything Tracy-GPU: when tracy is compiled out or the option is off,
+    // no device extension, no feature, no pools, no calibration, no overhead.
+    const enable_tracy_gpu = tracy.enabled and options.timestamp_queries;
+    const self = try alloc.create(VkBackend);
+    errdefer alloc.destroy(self);
+    self.* = .{ .allocator = alloc, .io = options.io };
     self.frames_in_flight = options.frames_in_flight;
     self.enable_debug_utils = options.enable_debug_utils;
     self.enable_nv_checkpoints = options.enable_nv_checkpoints;
     self.enable_nv_diagnostics = options.enable_nv_diagnostics;
     self.enable_device_fault = options.enable_device_fault;
+    self.timestamp_queries = enable_tracy_gpu;
     self.texture_view_cache = std.AutoHashMap(u64, vk.ImageView).init(alloc);
     self.sampler_cache = std.AutoHashMap(u64, vk.Sampler).init(alloc);
 
     const get_proc_addr = options.loader.get_instance_proc_addr orelse return error.BackendError;
     self.b = vk.BaseWrapper.load(get_proc_addr);
     log.info("Base wrapper loaded", .{});
+
+    const t0 = std.Io.Timestamp.now(options.io, .real);
 
     const app_info: vk.ApplicationInfo = .{
         .p_application_name = if (options.app_name.len > 0) options.app_name else "noapi",
@@ -350,7 +399,11 @@ pub fn init(options: Options) !VkBackend {
     const instance_handle = try self.b.createInstance(&instance_ci, null);
     self.vki = vk.InstanceWrapper.load(instance_handle, self.b.dispatch.vkGetInstanceProcAddr.?);
     self.instance = vk.InstanceProxy{ .handle = instance_handle, .wrapper = &self.vki };
-    log.info("Instance created (Vulkan 1.4)", .{});
+    {
+        const t1 = std.Io.Timestamp.now(options.io, .real);
+        const dt = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / @as(f64, std.time.ns_per_ms);
+        log.info("Instance created (Vulkan 1.4) — {d:.0}ms", .{dt});
+    }
 
     if (options.validation) {
         self.debug_messenger = try self.instance.createDebugUtilsMessengerEXT(&debug_messenger_ci, null);
@@ -428,7 +481,7 @@ pub fn init(options: Options) !VkBackend {
     log.info("Queue family: {}", .{self.queue_family_index});
 
     var features: DeviceFeatures = .{};
-    features.init();
+    features.init(enable_tracy_gpu);
 
     const q_prio = [_]f32{1.0};
     const queue_ci: vk.DeviceQueueCreateInfo = .{
@@ -444,6 +497,7 @@ pub fn init(options: Options) !VkBackend {
     if (options.enable_nv_checkpoints) try dev_exts.append(alloc, "VK_NV_device_diagnostic_checkpoints");
     if (options.enable_nv_diagnostics) try dev_exts.append(alloc, "VK_NV_device_diagnostics_config");
     if (options.enable_device_fault) try dev_exts.append(alloc, "VK_EXT_device_fault");
+    if (enable_tracy_gpu) try dev_exts.append(alloc, "VK_KHR_calibrated_timestamps");
 
     // NVIDIA diagnostics config for device crash breadcrumbs.
     // Must be chained DIRECTLY to VkDeviceCreateInfo.pNext (NOT inside the features chain).
@@ -485,7 +539,43 @@ pub fn init(options: Options) !VkBackend {
     const q_handle = self.device.getDeviceQueue(self.queue_family_index, 0);
     self.queue = .{ .handle = q_handle, .wrapper = &self.vkd };
 
-    log.info("Device created (shader objects + descriptor buffer + BDA)", .{});
+    // ── Tracy GPU profiling: capability checks + calibration + queue ──
+    if (enable_tracy_gpu) {
+        const lacks_timestamps = gpu_props.limits.timestamp_period <= 0 or
+            gpu_props.limits.timestamp_compute_and_graphics != .true;
+        if (lacks_timestamps) {
+            log.warn(
+                "Tracy GPU disabled: no timestamp queries (period={d}, cg={})",
+                .{ gpu_props.limits.timestamp_period, gpu_props.limits.timestamp_compute_and_graphics },
+            );
+            self.timestamp_queries = false;
+        } else {
+            self.timestamp_period = gpu_props.limits.timestamp_period;
+            var calib: [2]u64 = undefined;
+            if (self.calibrateGpuTimestamps(&tracy_calib_info, &calib)) {
+                self.tracy_prev_calib_cpu = calib[0];
+                self.tracy_queue = tracy.GpuQueue.init(.{
+                    .gpu_time = calib[1],
+                    .period = self.timestamp_period,
+                    .context = 0,
+                    // Calibrated context: server uses the drift-corrected conversion
+                    // and accepts per-frame GpuCalibration re-anchors (TracyVulkan.hpp).
+                    .flags = .{ .calibration = true },
+                    .type = .vulkan,
+                    .name = "graphics",
+                });
+            } else {
+                log.warn("Tracy GPU profiling disabled: getCalibratedTimestampsKHR failed", .{});
+                self.timestamp_queries = false;
+            }
+        }
+    }
+
+    {
+        const t2 = std.Io.Timestamp.now(options.io, .real);
+        const dt = @as(f64, @floatFromInt(t2.nanoseconds - t0.nanoseconds)) / @as(f64, std.time.ns_per_ms);
+        log.info("Device created (shader objects + descriptor buffer + BDA) — {d:.0}ms total", .{dt});
+    }
 
     // Per-queue timeline semaphore for frame pacing
     self.queue_sem = try self.device.createSemaphore(
@@ -568,6 +658,12 @@ pub fn init(options: Options) !VkBackend {
         self.setDebugName(.pipeline_layout, @intFromEnum(self.pipeline_layout_graphics), "pipeline_layout_gfx");
         self.setDebugName(.pipeline_layout, @intFromEnum(self.pipeline_layout_compute), "pipeline_layout_comp");
         log.info("Pipeline layouts created", .{});
+    }
+
+    {
+        const t_end = std.Io.Timestamp.now(options.io, .real);
+        const dt = @as(f64, @floatFromInt(t_end.nanoseconds - t_start.nanoseconds)) / @as(f64, std.time.ns_per_ms);
+        log.info("VkBackend init complete — {d:.0}ms total", .{dt});
     }
 
     return self;
@@ -688,7 +784,12 @@ pub fn numWindows(self: *const VkBackend) u32 {
     return @intCast(self.windows.items.len);
 }
 
-pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Extent2D) !u32 {
+pub fn addWindow(
+    self: *VkBackend,
+    surface: vk.SurfaceKHR,
+    initial_extent: Extent2D,
+    present_mode: vk.PresentModeKHR,
+) !u32 {
     // Find tombstone slot or append
     for (self.windows.items, 0..) |*w, i| {
         if (!w.valid) {
@@ -697,6 +798,7 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
                 .surface = surface,
                 .extent = initial_extent,
                 .requested_extent = initial_extent,
+                .present_mode = present_mode,
                 .frames_in_flight = self.frames_in_flight,
             };
             try initPerFrameSemaphoreLists(self, w);
@@ -708,7 +810,12 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
                     var name_buf: [64]u8 = undefined;
                     for (0..self.frames_in_flight) |f| {
                         const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
-                        const fname = std.fmt.bufPrintZ(&name_buf, "present_fence[{}]", .{f}) catch "present_fence";
+                        const fname = std.fmt.bufPrintSentinel(
+                            &name_buf,
+                            "present_fence[{}]",
+                            .{f},
+                            0,
+                        ) catch "present_fence";
                         self.setDebugName(.fence, @intFromEnum(fence), fname);
                         w.present_done_fences.appendAssumeCapacity(fence);
                     }
@@ -725,6 +832,7 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
         .surface = surface,
         .extent = initial_extent,
         .requested_extent = initial_extent,
+        .present_mode = present_mode,
         .frames_in_flight = self.frames_in_flight,
     };
     try initPerFrameSemaphoreLists(self, &win);
@@ -738,7 +846,7 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
             var name_buf: [64]u8 = undefined;
             for (0..self.frames_in_flight) |f| {
                 const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
-                const fname = std.fmt.bufPrintZ(&name_buf, "present_fence[{}]", .{f}) catch "present_fence";
+                const fname = std.fmt.bufPrintSentinel(&name_buf, "present_fence[{}]", .{f}, 0) catch "present_fence";
                 self.setDebugName(.fence, @intFromEnum(fence), fname);
                 win.present_done_fences.appendAssumeCapacity(fence);
             }
@@ -768,6 +876,7 @@ pub fn removeWindow(self: *VkBackend, index: u32) void {
 pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
+    win.slop_ns = 0;
 
     // Handle resize
     if (win.needs_resize) {
@@ -777,6 +886,7 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
         defer self.queue_mutex.unlock(self.io);
         if (use_swapchain_maintenance1) {
             for (win.present_done_fences.items) |f| {
+                const t_wf_resize = std.Io.Timestamp.now(self.io, .awake);
                 const zone_wf_resize = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
                 defer zone_wf_resize.end();
                 _ = try self.device.waitForFences(
@@ -784,11 +894,14 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
                     .true,
                     std.math.maxInt(u64),
                 );
+                win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_wf_resize.nanoseconds);
             }
         } else {
+            const t_dwi = std.Io.Timestamp.now(self.io, .awake);
             const zone_dwi_bf = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
             defer zone_dwi_bf.end();
             try self.device.deviceWaitIdle();
+            win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_dwi.nanoseconds);
         }
         try recreateSwapchain(self, win);
         win.needs_resize = false;
@@ -801,6 +914,7 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     const recreated = blk: {
         const zone_acq = tracy.Zone.begin(.{ .name = "acquireImage", .src = @src(), .color = .tomato });
         defer zone_acq.end();
+        const t_acq = std.Io.Timestamp.now(self.io, .awake);
         const acq = self.device.acquireNextImageKHR(
             win.swapchain,
             std.math.maxInt(u64),
@@ -815,16 +929,20 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
         };
         win.image_index = acq.image_index;
         _ = try self.device.waitForFences(([_]vk.Fence{acq_fence})[0..], .true, std.math.maxInt(u64));
+        win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_acq.nanoseconds);
         break :blk acq.result == .suboptimal_khr;
     };
 
     // Wait for previous frame to finish before reusing pool/fence
     {
+        const t_wf_cmd = std.Io.Timestamp.now(self.io, .awake);
         const zone_wf_cmd = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
         defer zone_wf_cmd.end();
         _ = try self.device.waitForFences(win.cmd_pool_ready.items[frame..][0..1], .true, std.math.maxInt(u64));
+        win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_wf_cmd.nanoseconds);
     }
     try self.device.resetFences(win.cmd_pool_ready.items[frame..][0..1]);
+    if (self.timestamp_queries) try self.collectTracyGpuQueries(win, frame);
     {
         const zone_rcp = tracy.Zone.begin(.{ .name = "resetCmdPool", .src = @src(), .color = .tomato });
         defer zone_rcp.end();
@@ -838,9 +956,12 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
         log.err("beginFrame: beginCommandBuffer failed: {}", .{err});
     {
         var name_buf: [64]u8 = undefined;
-        const label = std.fmt.bufPrintZ(&name_buf, "Frame {}", .{self.queue_counter}) catch "Frame";
+        const label = std.fmt.bufPrintSentinel(&name_buf, "Frame {}", .{self.queue_counter}, 0) catch "Frame";
         self.cmdBeginDebugLabel(win.cmd_buffers.items[frame].handle, label, .{ 0.2, 0.6, 1.0, 1.0 });
     }
+    // Tracy GPU frame zone: labels which swapchain image this frame renders into,
+    // so in-flight frames are identifiable on the GPU timeline.
+    if (self.timestamp_queries) self.beginFrameGpuZone(win, frame, win.image_index);
     {
         const barrier: vk.ImageMemoryBarrier2 = .{
             .image = win.images.items[win.image_index],
@@ -909,6 +1030,8 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
             .p_image_memory_barriers = @ptrCast(&barrier),
         });
     }
+
+    if (self.timestamp_queries) self.endFrameGpuZone(win, frame);
 
     try win.cmd_buffers.items[frame].endCommandBuffer();
 
@@ -996,6 +1119,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
             const af_present = if (use_swapchain_maintenance1) blk: {
                 const pfence = win.present_done_fences.items[frame];
                 // Wait for this frame's previous present to complete
+                const t_wf_p = std.Io.Timestamp.now(self.io, .awake);
                 const zone_wf_p = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
                 defer zone_wf_p.end();
                 _ = try self.device.waitForFences(
@@ -1003,6 +1127,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
                     .true,
                     std.math.maxInt(u64),
                 );
+                win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_wf_p.nanoseconds);
                 try self.device.resetFences(&[_]vk.Fence{pfence});
                 fence_info = .{ .swapchain_count = 1, .p_fences = @ptrCast(&pfence) };
                 break :blk vk.PresentInfoKHR{
@@ -1020,12 +1145,24 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
                 .p_swapchains = @ptrCast(&win.swapchain),
                 .p_image_indices = @ptrCast(&img_idx),
             };
+            const t_present = std.Io.Timestamp.now(self.io, .awake);
             const zone_present = tracy.Zone.begin(.{ .name = "queuePresent", .src = @src(), .color = .tomato });
             defer zone_present.end();
             if (self.queue.presentKHR(&af_present)) |_| {
                 if (win.retired_swapchain != .null_handle) {
                     self.device.destroySwapchainKHR(win.retired_swapchain, null);
                     win.retired_swapchain = .null_handle;
+                }
+                // Annotate the presentation on the CPU timeline; the GPU frame zone
+                // named "img {M}" identifies this frame on the GPU timeline.
+                if (self.timestamp_queries) {
+                    var msg_buf: [64]u8 = undefined;
+                    const msg = std.fmt.bufPrint(
+                        &msg_buf,
+                        "present frame {d} (img {d})",
+                        .{ signal_val, win.image_index },
+                    ) catch "present frame";
+                    tracy.message(.{ .text = msg, .color = .green });
                 }
             } else |e| {
                 if (e == error.OutOfDateKHR) {
@@ -1034,6 +1171,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
                     log.warn("endFrame: present failed: {}", .{e});
                 }
             }
+            win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_present.nanoseconds);
         }
     }
 
@@ -1171,7 +1309,10 @@ pub fn queryDeviceFault(self: *VkBackend) void {
                 log.warn("  Fault addresses ({d})", .{ac});
                 for (addr_infos[0..ac]) |ai| {
                     const atype = addressTypeName(ai.address_type);
-                    log.warn("    [{s}] addr=0x{x} precision={d} bytes", .{ atype, ai.reported_address, @as(u64, ai.address_precision) });
+                    log.warn(
+                        "    [{s}] addr=0x{x} precision={d} bytes",
+                        .{ atype, ai.reported_address, @as(u64, ai.address_precision) },
+                    );
                 }
             } else {
                 log.warn("  No address info — fault may be a TDR timeout, not a page fault", .{});
@@ -1195,7 +1336,12 @@ pub fn queryLastCheckpoint(self: *VkBackend) u32 {
         const count = @min(data_count, 64);
         var data: [64]vk.CheckpointDataNV = undefined;
         for (&data) |*d| {
-            d.* = .{ .s_type = .checkpoint_data_nv, .p_next = null, .stage = .{}, .p_checkpoint_marker = @ptrCast(&d.stage) };
+            d.* = .{
+                .s_type = .checkpoint_data_nv,
+                .p_next = null,
+                .stage = .{},
+                .p_checkpoint_marker = @ptrCast(&d.stage),
+            };
         }
         var query_count: u32 = count;
         self.device.getQueueCheckpointDataNV(self.queue.handle, &query_count, &data);
@@ -1327,8 +1473,12 @@ pub fn shaderCreate(self: *VkBackend, spv: []const u32, stage: u2, entry: [:0]co
     );
     {
         var name_buf: [64]u8 = undefined;
-        const stage_name = switch (stage) { 0 => "vert", 1 => "frag", else => "comp" };
-        const sname = std.fmt.bufPrintZ(&name_buf, "shader_{s}_{s}", .{ stage_name, entry }) catch "shader";
+        const stage_name = switch (stage) {
+            0 => "vert",
+            1 => "frag",
+            else => "comp",
+        };
+        const sname = std.fmt.bufPrintSentinel(&name_buf, "shader_{s}_{s}", .{ stage_name, entry }, 0) catch "shader";
         self.setDebugName(.shader_ext, @intFromEnum(shader_out[0]), sname);
     }
     return shader_out[0];
@@ -1584,7 +1734,15 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
 
     var color_attach: [8]vk.RenderingAttachmentInfo = undefined;
     // Zero out inactive entries so the validation layer doesn't see garbage image_views
-    for (&color_attach) |*ca| ca.* = .{ .image_view = .null_handle, .image_layout = .undefined, .resolve_mode = .{}, .resolve_image_layout = .undefined, .load_op = .dont_care, .store_op = .dont_care, .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } } };
+    for (&color_attach) |*ca| ca.* = .{
+        .image_view = .null_handle,
+        .image_layout = .undefined,
+        .resolve_mode = .{},
+        .resolve_image_layout = .undefined,
+        .load_op = .dont_care,
+        .store_op = .dont_care,
+        .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
+    };
     const color_count: u32 = @intCast(desc.color_attachments.len);
     if (color_count > 8) {
         log.warn("cmdBeginRendering: color_attachment count {} exceeds max 8, clamping", .{color_count});
@@ -1766,6 +1924,209 @@ pub fn cmdEndRendering(self: *VkBackend, cmd: CommandBufferHandle) void {
     }
 }
 
+// ── Tracy GPU zones (Vulkan timestamp queries) ─────────────
+const CmdOwner = struct {
+    win: *Window,
+    frame: u32,
+};
+
+/// Find the window + frame owning a command buffer handle.
+/// Returns null for offscreen/compute command buffers; those are silently skipped.
+fn findCmdOwner(self: *VkBackend, cmd: CommandBufferHandle) ?CmdOwner {
+    for (self.windows.items) |*win| {
+        for (win.cmd_buffers.items, 0..) |cb, f| {
+            if (cb.handle == cmd) return .{ .win = win, .frame = @intCast(f) };
+        }
+    }
+    return null;
+}
+
+/// Calibrate the device timestamp clock against the CPU clock for Tracy.
+/// Mirrors TracyVulkan.hpp: probe 32 samples and take the minimum driver-reported
+/// deviation, then retry until the deviation is at most 1.5× that minimum.
+/// A single blind sample can be off by the full deviation (µs..ms) if the GPU is
+/// busy at init, which would misplace every GPU zone on the CPU timeline.
+/// Returns false only on driver failure; on retry exhaustion the last sample wins.
+fn calibrateGpuTimestamps(
+    self: *VkBackend,
+    info: []const vk.CalibratedTimestampInfoKHR,
+    out: *[2]u64,
+) bool {
+    var min_dev: u64 = std.math.maxInt(u64);
+    var ts: [2]u64 = undefined;
+    for (0..32) |_| {
+        const dev = self.device.getCalibratedTimestampsKHR(info, &ts) catch return false;
+        if (dev < min_dev) {
+            min_dev = dev;
+            out.* = ts;
+        }
+    }
+    const threshold = min_dev * 3 / 2;
+    for (0..64) |_| {
+        const dev = self.device.getCalibratedTimestampsKHR(info, &ts) catch return false;
+        out.* = ts;
+        if (dev <= threshold) return true;
+    }
+    return true;
+}
+
+/// Source-location id for a swapchain image's per-frame GPU zone.
+/// Called every frame from beginFrameGpuZone, but registers lazily: allocSrclocName
+/// runs only on first use per image index (and again only if the swapchain grows
+/// more images on recreation). Allocated srclocs are never freed by the profiler,
+/// so the leak is bounded by the image count, not the frame count.
+fn tracyImgSrcloc(self: *VkBackend, win: *Window, image_index: u32) ?u64 {
+    const idx: usize = @intCast(image_index);
+    if (win.tracy_img_srclocs.items.len <= idx) {
+        const old_len = win.tracy_img_srclocs.items.len;
+        win.tracy_img_srclocs.resize(self.allocator, idx + 1) catch return null;
+        @memset(win.tracy_img_srclocs.items[old_len..], 0);
+    }
+    if (win.tracy_img_srclocs.items[idx] == 0) {
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "img {d}", .{image_index}) catch "img";
+        win.tracy_img_srclocs.items[idx] = tracy.allocSrclocName(
+            @src(),
+            name,
+            .{ .r = 105, .g = 105, .b = 105, .a = 255 }, // dim gray
+        );
+    }
+    const id = win.tracy_img_srclocs.items[idx];
+    return if (id == 0) null else id;
+}
+
+/// Begin the per-frame GPU zone named by swapchain image index. Each image is
+/// in flight at most once, so the name identifies the in-flight frame.
+fn beginFrameGpuZone(self: *VkBackend, win: *Window, frame: u32, image_index: u32) void {
+    if (win.tracy_queries.items[frame] >= TracyQueryId.cap) return;
+    const srcloc = self.tracyImgSrcloc(win, image_index) orelse return;
+    const id = win.tracy_queries.items[frame];
+    win.tracy_queries.items[frame] += 1;
+    const query_id: TracyQueryId = .{ .index = @intCast(id), .frame = @intCast(frame) };
+    self.tracy_queue.?.beginZoneAlloc(.{ .srcloc = srcloc, .query_id = @bitCast(query_id) });
+    self.device.cmdWriteTimestamp(
+        win.cmd_buffers.items[frame].handle,
+        .{ .bottom_of_pipe_bit = true },
+        win.tracy_query_pools.items[frame],
+        query_id.index,
+    );
+}
+
+/// End the per-frame GPU zone.
+fn endFrameGpuZone(self: *VkBackend, win: *Window, frame: u32) void {
+    if (win.tracy_queries.items[frame] >= TracyQueryId.cap) return;
+    const id = win.tracy_queries.items[frame];
+    win.tracy_queries.items[frame] += 1;
+    const query_id: TracyQueryId = .{ .index = @intCast(id), .frame = @intCast(frame) };
+    self.device.cmdWriteTimestamp(
+        win.cmd_buffers.items[frame].handle,
+        .{ .bottom_of_pipe_bit = true },
+        win.tracy_query_pools.items[frame],
+        query_id.index,
+    );
+    self.tracy_queue.?.endZone(@bitCast(query_id));
+}
+
+pub fn cmdBufBeginZone(self: *VkBackend, cmd: CommandBufferHandle, loc: *const tracy.SourceLocation) void {
+    if (!self.timestamp_queries) return;
+    const owner = findCmdOwner(self, cmd) orelse return;
+    const win = owner.win;
+    const frame = owner.frame;
+    if (win.tracy_queries.items[frame] >= TracyQueryId.cap) @panic("out of tracy gpu queries");
+    const id = win.tracy_queries.items[frame];
+    win.tracy_queries.items[frame] += 1;
+    const query_id: TracyQueryId = .{ .index = @intCast(id), .frame = @intCast(frame) };
+    self.tracy_queue.?.beginZone(.{ .query_id = @bitCast(query_id), .loc = loc });
+    self.device.cmdWriteTimestamp(
+        cmd,
+        .{ .bottom_of_pipe_bit = true },
+        win.tracy_query_pools.items[frame],
+        query_id.index,
+    );
+    if (self.enable_debug_utils) self.cmdBeginDebugLabel(cmd, std.mem.span(loc.name orelse loc.function), .{
+        @as(f32, @floatFromInt(loc.color.r)) / 255.0,
+        @as(f32, @floatFromInt(loc.color.g)) / 255.0,
+        @as(f32, @floatFromInt(loc.color.b)) / 255.0,
+        1.0,
+    });
+}
+
+pub fn cmdBufEndZone(self: *VkBackend, cmd: CommandBufferHandle) void {
+    if (!self.timestamp_queries) return;
+    const owner = findCmdOwner(self, cmd) orelse return;
+    const win = owner.win;
+    const frame = owner.frame;
+    if (win.tracy_queries.items[frame] >= TracyQueryId.cap) @panic("out of tracy gpu queries");
+    const id = win.tracy_queries.items[frame];
+    win.tracy_queries.items[frame] += 1;
+    const query_id: TracyQueryId = .{ .index = @intCast(id), .frame = @intCast(frame) };
+    self.device.cmdWriteTimestamp(
+        cmd,
+        .{ .bottom_of_pipe_bit = true },
+        win.tracy_query_pools.items[frame],
+        query_id.index,
+    );
+    self.tracy_queue.?.endZone(@bitCast(query_id));
+    if (self.enable_debug_utils) self.cmdEndDebugLabel(cmd);
+}
+
+/// Read back completed timestamp queries and feed them to the Tracy GPU queue.
+/// Called from beginFrame once the previous frame's fence has signaled.
+fn collectTracyGpuQueries(self: *VkBackend, win: *Window, frame: u32) !void {
+    const queries = win.tracy_queries.items[frame];
+    if (queries == 0) return;
+    const results = try self.allocator.alloc(u64, @as(usize, queries) * 2);
+    defer self.allocator.free(results);
+    const result = self.device.getQueryPoolResults(
+        win.tracy_query_pools.items[frame],
+        0,
+        queries,
+        results.len * @sizeOf(u64),
+        @ptrCast(results.ptr),
+        @sizeOf(u64) * 2,
+        .{ .@"64_bit" = true, .with_availability_bit = true },
+    ) catch |err| {
+        log.warn("collectTracyGpuQueries: getQueryPoolResults failed: {}", .{err});
+        self.device.resetQueryPool(win.tracy_query_pools.items[frame], 0, TracyQueryId.cap);
+        win.tracy_queries.items[frame] = 0;
+        return;
+    };
+    switch (result) {
+        // Unsubmitted command buffers leave their queries never-written; skip via availability bit.
+        .success, .not_ready => {},
+        else => {
+            log.warn("collectTracyGpuQueries: getQueryPoolResults returned {}", .{result});
+            self.device.resetQueryPool(win.tracy_query_pools.items[frame], 0, TracyQueryId.cap);
+            win.tracy_queries.items[frame] = 0;
+            return;
+        },
+    }
+    for (0..queries) |i| {
+        if (results[i * 2 + 1] != 0) {
+            self.tracy_queue.?.emitTime(.{
+                .query_id = @bitCast(TracyQueryId{ .index = @intCast(i), .frame = @intCast(frame) }),
+                .gpu_time = results[i * 2],
+            });
+        }
+    }
+    // Re-anchor the GPU↔CPU timeline every frame (mirrors TracyVulkan.hpp Collect):
+    // fresh calibrated pair; cpuDelta = CPU-clock advance since the last calibration.
+    // The server recomputes calibrationMod from it, compensating GPU counter drift
+    // (power states, suspend) so zones stay aligned with the CPU timeline.
+    var calib: [2]u64 = undefined;
+    if (self.device.getCalibratedTimestampsKHR(&tracy_calib_info, &calib)) |_| {
+        const delta: i64 = @as(i64, @intCast(calib[0])) - @as(i64, @intCast(self.tracy_prev_calib_cpu));
+        if (delta > 0) {
+            self.tracy_prev_calib_cpu = calib[0];
+            self.tracy_queue.?.calibrate(.{ .gpu_time = calib[1], .cpu_delta = delta });
+        }
+    } else |err| {
+        log.warn("collectTracyGpuQueries: re-calibration failed: {}", .{err});
+    }
+    self.device.resetQueryPool(win.tracy_query_pools.items[frame], 0, TracyQueryId.cap);
+    win.tracy_queries.items[frame] = 0;
+}
+
 pub fn cmdBeginDebugLabel(self: *VkBackend, cmd: CommandBufferHandle, name: [:0]const u8, color: [4]f32) void {
     if (!self.enable_debug_utils) return;
     if (self.debug_messenger == .null_handle) return;
@@ -1785,7 +2146,7 @@ pub fn cmdEndDebugLabel(self: *VkBackend, cmd: CommandBufferHandle) void {
 pub fn cmdInsertDebugLabel(self: *VkBackend, cmd: CommandBufferHandle, name: [:0]const u8, color: [4]f32) void {
     if (!self.enable_debug_utils) return;
     if (self.debug_messenger == .null_handle) return;
-    const label = vk.DebugUtilsLabelEXT{ .p_label_name = name, .color = color };
+    const label: vk.DebugUtilsLabelEXT = .{ .p_label_name = name, .color = color };
     self.device.cmdInsertDebugUtilsLabelEXT(cmd, &label);
 }
 
@@ -1793,13 +2154,14 @@ pub fn cmdInsertDebugLabel(self: *VkBackend, cmd: CommandBufferHandle, name: [:0
 pub fn setDebugName(self: *VkBackend, object_type: vk.ObjectType, handle: u64, name: [:0]const u8) void {
     if (!self.enable_debug_utils) return;
     if (self.debug_messenger == .null_handle) return;
-    const info = vk.DebugUtilsObjectNameInfoEXT{
+    const info: vk.DebugUtilsObjectNameInfoEXT = .{
         .object_type = object_type,
         .object_handle = handle,
         .p_object_name = name,
     };
-    self.device.setDebugUtilsObjectNameEXT(&info) catch {
+    self.device.setDebugUtilsObjectNameEXT(&info) catch |err| {
         // Silently ignore if the extension is not available
+        log.debug("setDebugUtilsObjectNameEXT failed: {}", .{err});
     };
 }
 
@@ -1937,12 +2299,37 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     );
     defer alloc.free(present_modes);
     var chosen_present = vk.PresentModeKHR.fifo_khr;
-    for (present_modes) |pm| {
-        if (pm == .mailbox_khr) {
-            chosen_present = pm;
+    var requested_supported = false;
+    for (present_modes) |mode| {
+        if (mode == win.present_mode) {
+            chosen_present = mode;
+            requested_supported = true;
             break;
         }
     }
+    if (!requested_supported) {
+        const fallback_modes: []const vk.PresentModeKHR = switch (win.present_mode) {
+            .immediate_khr => &.{ .mailbox_khr, .fifo_relaxed_khr, .fifo_khr },
+            .mailbox_khr => &.{ .fifo_relaxed_khr, .fifo_khr },
+            .fifo_relaxed_khr => &.{.fifo_khr},
+            .fifo_khr => &.{.fifo_khr},
+            else => &.{.fifo_khr},
+        };
+        for (fallback_modes) |fallback| {
+            for (present_modes) |mode| {
+                if (mode == fallback) {
+                    chosen_present = mode;
+                    break;
+                }
+            }
+            if (chosen_present == fallback) break;
+        }
+        log.warn(
+            "Requested present mode {} unavailable; using {}",
+            .{ win.present_mode, chosen_present },
+        );
+    }
+    log.info("Present mode: {} ({} modes supported)", .{ chosen_present, present_modes.len });
 
     // Hand the surface to the device for swapchain maintenance
     const swapchain_ci: vk.SwapchainCreateInfoKHR = .{
@@ -1984,7 +2371,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     {
         var name_buf: [64]u8 = undefined;
         for (win.images.items, 0..) |img, i| {
-            const name = std.fmt.bufPrintZ(&name_buf, "swapchain_img[{}]", .{i}) catch "swapchain_img";
+            const name = std.fmt.bufPrintSentinel(&name_buf, "swapchain_img[{}]", .{i}, 0) catch "swapchain_img";
             self.setDebugName(.image, @intFromEnum(img), name);
         }
     }
@@ -2010,7 +2397,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
                     .layer_count = 1,
                 },
             }, null);
-            const vname = std.fmt.bufPrintZ(&name_buf, "swapchain_view[{}]", .{i}) catch "swapchain_view";
+            const vname = std.fmt.bufPrintSentinel(&name_buf, "swapchain_view[{}]", .{i}, 0) catch "swapchain_view";
             self.setDebugName(.image_view, @intFromEnum(view), vname);
             new_views.appendAssumeCapacity(view);
         }
@@ -2037,7 +2424,7 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
         }, null);
         {
             var name_buf: [64]u8 = undefined;
-            const pname = std.fmt.bufPrintZ(&name_buf, "cmd_pool[{}]", .{f}) catch "cmd_pool";
+            const pname = std.fmt.bufPrintSentinel(&name_buf, "cmd_pool[{}]", .{f}, 0) catch "cmd_pool";
             self.setDebugName(.command_pool, @intFromEnum(pool), pname);
         }
         win.cmd_pools.appendAssumeCapacity(pool);
@@ -2050,7 +2437,7 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
         }, @ptrCast(&cb_handle));
         {
             var name_buf: [64]u8 = undefined;
-            const cname = std.fmt.bufPrintZ(&name_buf, "cmd_buf[{}]", .{f}) catch "cmd_buf";
+            const cname = std.fmt.bufPrintSentinel(&name_buf, "cmd_buf[{}]", .{f}, 0) catch "cmd_buf";
             self.setDebugName(.command_buffer, @intFromEnum(cb_handle), cname);
         }
         win.cmd_buffers.appendAssumeCapacity(.{ .handle = cb_handle, .wrapper = &self.vkd });
@@ -2058,10 +2445,24 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
         const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
         {
             var name_buf: [64]u8 = undefined;
-            const fname = std.fmt.bufPrintZ(&name_buf, "cmd_fence[{}]", .{f}) catch "cmd_fence";
+            const fname = std.fmt.bufPrintSentinel(&name_buf, "cmd_fence[{}]", .{f}, 0) catch "cmd_fence";
             self.setDebugName(.fence, @intFromEnum(fence), fname);
         }
         win.cmd_pool_ready.appendAssumeCapacity(fence);
+    }
+    // Tracy GPU query pools: one per frame, host-reset (host_query_reset feature).
+    if (self.timestamp_queries) {
+        try win.tracy_query_pools.ensureTotalCapacity(alloc, frames);
+        try win.tracy_queries.ensureTotalCapacity(alloc, frames);
+        for (0..frames) |_| {
+            const pool = try self.device.createQueryPool(&.{
+                .query_type = .timestamp,
+                .query_count = TracyQueryId.cap,
+            }, null);
+            self.device.resetQueryPool(pool, 0, TracyQueryId.cap);
+            win.tracy_query_pools.appendAssumeCapacity(pool);
+            win.tracy_queries.appendAssumeCapacity(0);
+        }
     }
     log.info("Per-frame resources created: {} frames", .{frames});
 }
@@ -2088,7 +2489,7 @@ fn createPresentSemaphores(self: *VkBackend, win: *Window) !void {
         var name_buf: [64]u8 = undefined;
         for (win.images.items, 0..) |_, i| {
             const sem = try self.device.createSemaphore(&.{}, null);
-            const sname = std.fmt.bufPrintZ(&name_buf, "present_sem[{}]", .{i}) catch "present_sem";
+            const sname = std.fmt.bufPrintSentinel(&name_buf, "present_sem[{}]", .{i}, 0) catch "present_sem";
             self.setDebugName(.semaphore, @intFromEnum(sem), sname);
             win.present_sems.appendAssumeCapacity(sem);
         }
@@ -2122,6 +2523,12 @@ fn destroyWindow(self: *VkBackend, win: *Window) void {
     win.cmd_buffers.deinit(alloc);
     for (win.cmd_pool_ready.items) |f| self.device.destroyFence(f, null);
     win.cmd_pool_ready.deinit(alloc);
+    if (self.timestamp_queries) {
+        for (win.tracy_query_pools.items) |p| self.device.destroyQueryPool(p, null);
+        win.tracy_query_pools.deinit(alloc);
+        win.tracy_queries.deinit(alloc);
+        win.tracy_img_srclocs.deinit(alloc);
+    }
     if (use_swapchain_maintenance1) {
         for (win.present_done_fences.items) |f| self.device.destroyFence(f, null);
         win.present_done_fences.deinit(alloc);
@@ -2291,7 +2698,12 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
     errdefer self.device.destroyImage(image, null);
     {
         var name_buf: [64]u8 = undefined;
-        const iname = std.fmt.bufPrintZ(&name_buf, "tex_img[{}]", .{self.textures.items.len + 1}) catch "tex_img";
+        const iname = std.fmt.bufPrintSentinel(
+            &name_buf,
+            "tex_img[{}]",
+            .{self.textures.items.len + 1},
+            0,
+        ) catch "tex_img";
         self.setDebugName(.image, @intFromEnum(image), iname);
     }
 
@@ -2389,7 +2801,12 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
     errdefer self.device.destroyImageView(default_view, null);
     {
         var name_buf: [64]u8 = undefined;
-        const vname = std.fmt.bufPrintZ(&name_buf, "tex_view[{}]", .{self.textures.items.len + 1}) catch "tex_view";
+        const vname = std.fmt.bufPrintSentinel(
+            &name_buf,
+            "tex_view[{}]",
+            .{self.textures.items.len + 1},
+            0,
+        ) catch "tex_view";
         self.setDebugName(.image_view, @intFromEnum(default_view), vname);
     }
 
@@ -2600,14 +3017,14 @@ pub fn descHeapCreate(self: *VkBackend, texture_count: u32, texture_rw_count: u3
         .p_set_layouts = @ptrCast(&self.desc_layouts),
     }, &sets);
 
-    const idx = @as(u32, @intCast(self.desc_heaps.items.len));
+    const idx: u32 = @intCast(self.desc_heaps.items.len);
     {
         var name_buf: [64]u8 = undefined;
-        const pname = std.fmt.bufPrintZ(&name_buf, "desc_pool[{}]", .{idx}) catch "desc_pool";
+        const pname = std.fmt.bufPrintSentinel(&name_buf, "desc_pool[{}]", .{idx}, 0) catch "desc_pool";
         self.setDebugName(.descriptor_pool, @intFromEnum(pool), pname);
         const set_labels = [_][]const u8{ "tex", "tex_rw", "samp" };
         for (&sets, set_labels) |*s, label| {
-            const sn = std.fmt.bufPrintZ(&name_buf, "desc_set_{s}[{}]", .{ label, idx }) catch "desc_set";
+            const sn = std.fmt.bufPrintSentinel(&name_buf, "desc_set_{s}[{}]", .{ label, idx }, 0) catch "desc_set";
             self.setDebugName(.descriptor_set, @intFromEnum(s.*), sn);
         }
     }
@@ -2887,8 +3304,17 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
     errdefer self.device.destroyBuffer(buf, null);
     {
         var name_buf: [64]u8 = undefined;
-        const mem_label = switch (mem_type) { .gpu => "gpu", .default => "host", .readback => "read" };
-        const bname = std.fmt.bufPrintZ(&name_buf, "buf_{s}[{}]", .{ mem_label, self.allocs.items.len }) catch "buf";
+        const mem_label = switch (mem_type) {
+            .gpu => "gpu",
+            .default => "host",
+            .readback => "read",
+        };
+        const bname = std.fmt.bufPrintSentinel(
+            &name_buf,
+            "buf_{s}[{}]",
+            .{ mem_label, self.allocs.items.len },
+            0,
+        ) catch "buf";
         self.setDebugName(.buffer, @intFromEnum(buf), bname);
     }
 

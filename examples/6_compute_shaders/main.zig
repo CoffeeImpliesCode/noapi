@@ -8,9 +8,7 @@ const std = @import("std");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const common = @import("common");
-const vk = noapi.vk;
 const DescriptorPool = noapi.DescriptorPool;
-const Io = std.Io;
 pub const tracy_impl = common.tracy_impl;
 pub const tracy = common.tracy;
 pub const tracy_options = common.tracy_options;
@@ -24,20 +22,44 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.App.init(gpa, "6_compute_shaders", start_width, start_height, frames_in_flight, io);
+    var app = try common.App.init("6_compute_shaders", gpa, io, start_width, start_height, frames_in_flight, true);
     defer app.deinit();
     try app.sdl_win.show();
     const win_id = try app.sdl_win.getId();
 
-    // ── Shaders ────────────────────────────────────────────
-    const comp_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/compute_comp.spv", .compute, "main", "compute");
+    // ── Shaders ────────────────────────────────
+    const comp_shader = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/compute_comp.spv",
+        .compute,
+        "main",
+        "compute",
+    );
     defer comp_shader.destroy();
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/fullscreen_quad_vert.spv", .vertex, "main", "fullscreen_quad");
+    const vert_shader = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/fullscreen_quad_vert.spv",
+        .vertex,
+        "main",
+        "fullscreen_quad",
+    );
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/tex_sample_frag.spv", .fragment, "main", "tex_sample");
+    const frag_shader = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/tex_sample_frag.spv",
+        .fragment,
+        "main",
+        "tex_sample",
+    );
     defer frag_shader.destroy();
 
-    // ── Descriptor pool ────────────────────────────────────
+    // ── Descriptor pool ──────────────────────────────
     var pool = try DescriptorPool.init(app.gpu, 1, 1, 1);
     defer pool.deinit();
 
@@ -58,22 +80,14 @@ pub fn main(init: std.process.Init) !void {
     const indirect_buf = try app.gpu.gpuMalloc(@sizeOf(noapi.DispatchIndirectCommand), 4, .default);
     defer app.gpu.gpuFree(indirect_buf);
 
-    // ── Timing ─────────────────────────────────────────────
-    const ts_freq = sdl3.timer.getPerformanceFrequency();
-    var now_ts = sdl3.timer.getPerformanceCounter();
-    var total_time: f32 = 0;
-
-    // ── Frame pacing semaphore ─────────────────────────────
+    // ── Frame pacing semaphore ───────────────────────────
     const frame_sem = try app.gpu.semaphoreCreate(0);
     defer app.gpu.semaphoreDestroy(frame_sem);
     var next_frame: u64 = 1;
 
-    // ── Main loop ──────────────────────────────────────────
+    // ── Main loop ────────────────────────────────
     var should_close = false;
-    // ── FPS counter ─────────────────────────────────────────
-    var fps_timer: u64 = sdl3.timer.getPerformanceCounter();
-    var fps_frames: u32 = 0;
-    const fps_freq: u64 = sdl3.timer.getPerformanceFrequency();
+    var timer = common.FrameTimer.initMax(1.0 / 10.0);
     while (!should_close) {
         // Event handling
         while (sdl3.events.poll()) |ev| {
@@ -86,7 +100,10 @@ pub fn main(init: std.process.Init) !void {
                     if (ke.key == .escape) should_close = true;
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (we.id == win_id) app.surf.notifyResize(.{
+                        .width = @intCast(we.width),
+                        .height = @intCast(we.height),
+                    });
                 },
                 else => {},
             }
@@ -127,48 +144,48 @@ pub fn main(init: std.process.Init) !void {
             tex_rw_idx = pool.allocTextureRw(output_tex, .@"2d");
         }
 
-        // Delta time
-        const last_ts = now_ts;
-        now_ts = sdl3.timer.getPerformanceCounter();
-        const dt_numer: f64 = @floatFromInt(now_ts -| last_ts);
-        const dt_denom: f64 = @floatFromInt(ts_freq);
-        const delta: f32 = @floatCast(dt_numer / dt_denom);
-        const max_dt: f32 = 1.0 / 10.0;
-        total_time += @min(max_dt, delta);
+        timer.tick();
 
-        // ── Compute dispatch ────────────────────────────────
+        // ── Compute dispatch ────────────────────────────
         const group_size_x: u32 = 8;
         const group_size_y: u32 = 8;
         const num_groups_x = (surface_size.width + group_size_x - 1) / group_size_x;
         const num_groups_y = (surface_size.height + group_size_y - 1) / group_size_y;
 
         var cmd = app.surf.commandsBegin();
+        cmd.beginZone(.{ .name = "compute pass", .src = @src(), .color = .green });
         cmd.bindDescriptorSets(pool.heap);
         cmd.setComputeShader(comp_shader);
 
         // Push constant: the compute shader expects float time at offset 0.
         // The noapi API pushes a u64; the shader reads the first 4 bytes as float.
-        const push_u32: u32 = @bitCast(total_time);
+        const push_u32: u32 = @bitCast(timer.elapsed);
         const push_data: u64 = push_u32;
 
         if (use_indirect) {
             // Write indirect dispatch command to GPU-visible buffer
-            const indirect_cmd = @as(*noapi.DispatchIndirectCommand, @ptrCast(@alignCast(indirect_buf.cpu)));
+            const indirect_cmd: *noapi.DispatchIndirectCommand = @ptrCast(@alignCast(indirect_buf.cpu));
             indirect_cmd.* = .{
                 .num_groups_x = num_groups_x,
                 .num_groups_y = num_groups_y,
                 .num_groups_z = 1,
             };
+            cmd.beginZone(.{ .name = "dispatch indirect", .src = @src(), .color = .yellow_green });
             cmd.dispatchIndirect(push_data, indirect_buf);
+            cmd.endZone();
         } else {
+            cmd.beginZone(.{ .name = "dispatch", .src = @src(), .color = .yellow_green });
             cmd.dispatch(push_data, num_groups_x, num_groups_y, 1);
+            cmd.endZone();
         }
+        cmd.endZone(); // compute pass
 
         // Barrier: ensure compute shader finishes before fragment shader reads
         cmd.barrier(.{ .compute = true }, .{ .fragment = true }, .{});
 
         // ── Render compute output as fullscreen quad ────────
         const sc = app.surf.currentImage();
+        cmd.beginZone(.{ .name = "quad draw", .src = @src(), .color = .sky_blue });
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{ 0, 0, 0, 1 } },
         }, .render_area_size = .{ surface_size.width, surface_size.height } });
@@ -178,25 +195,14 @@ pub fn main(init: std.process.Init) !void {
         cmd.draw(.{}, 6, 1);
 
         cmd.endRendering();
+        cmd.endZone(); // quad draw
 
         // Signal semaphore and present
         cmd.addSignalSemaphore(0, frame_sem, next_frame);
         _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
         next_frame += 1;
 
-        // ── FPS output ──────────────────────────────────────
-        fps_frames += 1;
-        if (fps_frames == 60) {
-            const now = sdl3.timer.getPerformanceCounter();
-            const elapsed_ns = now - fps_timer;
-            const fps_numer: f64 = @floatFromInt(fps_freq * fps_frames);
-            const fps_denom: f64 = @floatFromInt(elapsed_ns);
-            const fps = fps_numer / fps_denom;
-            const ms = fps_denom / fps_numer * 1000.0;
-            std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
-            fps_timer = now;
-            fps_frames = 0;
-        }
+        timer.report();
     }
 
     try app.gpu.waitIdle();

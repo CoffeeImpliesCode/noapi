@@ -5,8 +5,6 @@ const std = @import("std");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const common = @import("common");
-const vk = noapi.vk;
-const Io = std.Io;
 pub const tracy_impl = common.tracy_impl;
 pub const tracy = common.tracy;
 pub const tracy_options = common.tracy_options;
@@ -93,19 +91,35 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.App.init(gpa, "3D Cube", win_width, win_height, @intCast(frames_in_flight), io);
+    var app = try common.App.init("3D Cube", gpa, io, win_width, win_height, @intCast(frames_in_flight), true);
     app.surf.gpu = app.gpu; // fix dangling ptr: surf.gpu captured &local_gpu before App reached final stack addr
     defer app.deinit();
     try app.sdl_win.show();
     const win_id = try app.sdl_win.getId();
 
-    // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/cube_vert.spv", .vertex, "main", "cube_vert");
+    // ── Shaders ─────────────────────────────
+    const vert_shader = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/cube_vert.spv",
+        .vertex,
+        "main",
+        "cube_vert",
+    );
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/cube_frag.spv", .fragment, "main", "cube_frag");
+    const frag_shader = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/cube_frag.spv",
+        .fragment,
+        "main",
+        "cube_frag",
+    );
     defer frag_shader.destroy();
 
-    // ── Depth texture ──────────────────────────────────────
+    // ── Depth texture ────────────────────────────
     var depth_handle = try app.gpu.textureCreate(.{
         .dimensions = .{ win_width, win_height, 1 },
         .format = .d32_float,
@@ -114,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
     defer app.gpu.textureDestroy(depth_handle);
     var depth_size = [2]u32{ win_width, win_height };
 
-    // ── GPU buffers ────────────────────────────────────────
+    // ── GPU buffers ─────────────────────────────
     // Per-frame data buffer (positions + colors + matrices).
     const frame_data_size = @sizeOf(PerFrameData);
     const frame_data_buf = try app.gpu.gpuMalloc(frame_data_size, 64, .default);
@@ -132,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
     const frame_sem = try app.gpu.semaphoreCreate(0);
     defer app.gpu.semaphoreDestroy(frame_sem);
 
-    // ── Camera state ───────────────────────────────────────
+    // ── Camera state ────────────────────────────
     var cam_pos: [3]f32 = .{ -1, 0, 0 };
     var cam_yaw: f32 = 0;
     var cam_pitch: f32 = 0;
@@ -140,21 +154,14 @@ pub fn main(init: std.process.Init) !void {
     var mouse_dy: f32 = 0;
     var right_click_pressed = false;
 
-    // ── Frame pacing ───────────────────────────────────────
+    // ── Frame pacing ────────────────────────────
     var frame_counter: u64 = 0;
-    var prev_ts: u64 = sdl3.timer.getPerformanceCounter();
-    const ts_freq: u64 = sdl3.timer.getPerformanceFrequency();
-    const max_dt: f32 = 1.0 / 10.0;
+    var timer = common.FrameTimer.initMax(1.0 / 10.0);
 
-    // ── FPS counter ─────────────────────────────────────────
-    var fps_timer: u64 = sdl3.timer.getPerformanceCounter();
-    var fps_frames: u32 = 0;
-    const fps_freq: u64 = sdl3.timer.getPerformanceFrequency();
-
-    // ── Main loop ──────────────────────────────────────────
+    // ── Main loop ──────────────────────────────
     var should_close = false;
     while (!should_close) {
-        // ── Events ─────────────────────────────────────────
+        // ── Events ─────────────────────────────
         while (sdl3.events.poll()) |ev| {
             switch (ev) {
                 .quit => should_close = true,
@@ -191,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        // ── Begin frame ────────────────────────────────────
+        // ── Begin frame ───────────────────────────
         _ = app.surf.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
@@ -217,16 +224,8 @@ pub fn main(init: std.process.Init) !void {
             depth_size = .{ surf_w, surf_h };
         }
 
-        // ── Delta time ─────────────────────────────────────
-        const now_ts = sdl3.timer.getPerformanceCounter();
-        const dt_numer: f32 = @floatFromInt(now_ts -| prev_ts);
-        const dt_denom: f32 = @floatFromInt(ts_freq);
-        const dt = @min(max_dt, dt_numer / dt_denom);
-
-        prev_ts = now_ts;
-
-        // _ = dt;
-        // ── Camera update ──────────────────────────────────
+        timer.tick();
+        // ── Camera update ─────────────────────────
         const mouse_sens: f32 = 0.002;
         if (right_click_pressed) {
             cam_yaw += mouse_dx * mouse_sens;
@@ -266,11 +265,11 @@ pub fn main(init: std.process.Init) !void {
         };
 
         const move_speed: f32 = 4.0;
-        cam_pos[0] += world_move[0] * move_speed * dt;
-        cam_pos[1] += world_move[1] * move_speed * dt;
-        cam_pos[2] += world_move[2] * move_speed * dt;
+        cam_pos[0] += world_move[0] * move_speed * timer.delta;
+        cam_pos[1] += world_move[1] * move_speed * timer.delta;
+        cam_pos[2] += world_move[2] * move_speed * timer.delta;
 
-        // ── Build view matrix ──────────────────────────────
+        // ── Build view matrix ─────────────────────
         // Camera forward direction from yaw/pitch.
         const fwd: [3]f32 = .{
             @cos(cam_yaw) * @cos(cam_pitch),
@@ -284,9 +283,9 @@ pub fn main(init: std.process.Init) !void {
         // View matrix: inverse of camera transform.
         // Column-major 4x4.
         var view: [16]f32 = .{
-            right[0],              up[0],              -fwd[0],            0,
-            right[1],              up[1],              -fwd[1],            0,
-            right[2],              up[2],              -fwd[2],            0,
+            right[0],                    up[0],                    -fwd[0],                  0,
+            right[1],                    up[1],                    -fwd[1],                  0,
+            right[2],                    up[2],                    -fwd[2],                  0,
             -common.dot(right, cam_pos), -common.dot(up, cam_pos), common.dot(fwd, cam_pos), 1,
         };
 
@@ -315,10 +314,11 @@ pub fn main(init: std.process.Init) !void {
         @memcpy(&pfd.world_to_view, &view);
         @memcpy(&pfd.view_to_proj, &proj);
 
-        // ── Render ─────────────────────────────────────────
+        // ── Render ─────────────────────────────
         const sc = app.surf.currentImage();
         var cmd = app.surf.commandsBegin();
 
+        cmd.beginZone(.{ .name = "cube render", .src = @src(), .color = .cornflower_blue });
         cmd.beginRendering(.{
             .color_attachments = &.{
                 .{
@@ -344,9 +344,12 @@ pub fn main(init: std.process.Init) !void {
         cmd.setDepthState(.{ .mode = .{ .read = true, .write = true }, .compare = .less_equal });
 
         // Draw indexed cube: pass buffer device address via vert_data push constant.
+        cmd.beginZone(.{ .name = "draw cube", .src = @src(), .color = .orange });
         cmd.drawIndexed(.{ .vert_data = frame_data_buf.gpu }, idx_buf, cube_indices, 1, 0, 0);
+        cmd.endZone();
 
         cmd.endRendering();
+        cmd.endZone();
 
         frame_counter += 1;
         cmd.addSignalSemaphore(app.surf.index, frame_sem, frame_counter);
@@ -358,22 +361,8 @@ pub fn main(init: std.process.Init) !void {
             try app.gpu.semaphoreWait(frame_sem, frame_counter - frames_in_flight + 1);
         }
 
-        // ── FPS output ──────────────────────────────────────
-        fps_frames += 1;
-        if (fps_frames == 60) {
-            const now = sdl3.timer.getPerformanceCounter();
-            const elapsed_ns = now - fps_timer;
-            const fps_numer: f64 = @floatFromInt(fps_freq * fps_frames);
-            const fps_denom: f64 = @floatFromInt(elapsed_ns);
-            const fps = fps_numer / fps_denom;
-            const ms = fps_denom / fps_numer * 1000.0;
-            std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
-            fps_timer = now;
-            fps_frames = 0;
-        }
+        timer.report();
     }
 
     try app.gpu.waitIdle();
 }
-
-

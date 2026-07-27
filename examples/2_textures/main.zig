@@ -8,7 +8,6 @@ const common = @import("common");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const vk = noapi.vk;
-const Io = std.Io;
 pub const tracy_impl = common.tracy_impl;
 pub const tracy = common.tracy;
 pub const tracy_options = common.tracy_options;
@@ -20,18 +19,34 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.App.init(gpa, "noapi 2_textures", 800, 600, 2, io);
+    var app = try common.App.init("noapi 2_textures", gpa, io, 800, 600, 2, false);
     defer app.deinit();
     try app.sdl_win.show();
     win_id = try app.sdl_win.getId();
 
-    // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/tex_vert.spv", .vertex, "main", "tex_vert");
+    // ── Shaders ────────────────────────────────
+    const vert_shader = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/tex_vert.spv",
+        .vertex,
+        "main",
+        "tex_vert",
+    );
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/tex_frag.spv", .fragment, "main", "tex_frag");
+    const frag_shader = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/tex_frag.spv",
+        .fragment,
+        "main",
+        "tex_frag",
+    );
     defer frag_shader.destroy();
 
-    // ── Vertex + index data ────────────────────────────────
+    // ── Vertex + index data ────────────────────────────
     // Quad: 4 vertices (position: vec2, uv: vec2), 6 indices
     const Vertex = extern struct { pos: [2]f32, uv: [2]f32 };
     const vertex_stride = @sizeOf(Vertex);
@@ -56,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
     indices[4] = 1;
     indices[5] = 3;
 
-    // ── Procedural textures ────────────────────────────────
+    // ── Procedural textures ────────────────────────────
     // Generate two checkerboard patterns in CPU memory
     const pixel_count = tex_size * tex_size;
     const tex_bytes = pixel_count * 4; // RGBA8
@@ -66,20 +81,18 @@ pub fn main(init: std.process.Init) !void {
     const pixels_b = try gpa.alloc(u8, tex_bytes);
     defer gpa.free(pixels_b);
 
-    generateCheckerboard(pixels_a, tex_size, checker_size,
-        .{ 255, 128, 0, 255 },   // orange
-        .{ 0, 128, 255, 255 }    // blue
+    generateCheckerboard(pixels_a, tex_size, checker_size, .{ 255, 128, 0, 255 }, // orange
+        .{ 0, 128, 255, 255 } // blue
     );
-    generateCheckerboard(pixels_b, tex_size, checker_size / 2,
-        .{ 0, 200, 100, 255 },   // green
-        .{ 200, 0, 200, 255 }    // magenta
+    generateCheckerboard(pixels_b, tex_size, checker_size / 2, .{ 0, 200, 100, 255 }, // green
+        .{ 200, 0, 200, 255 } // magenta
     );
 
     // Staging buffers for texture upload
-    const staging_a = try common.gpuCreate(app.gpu, u8, pixels_a, 64);
+    const staging_a = try common.gpuCreate(u8, app.gpu, pixels_a, 64);
     defer app.gpu.gpuFree(staging_a);
 
-    const staging_b = try common.gpuCreate(app.gpu, u8, pixels_b, 64);
+    const staging_b = try common.gpuCreate(u8, app.gpu, pixels_b, 64);
     defer app.gpu.gpuFree(staging_b);
 
     // Create GPU textures
@@ -93,22 +106,29 @@ pub fn main(init: std.process.Init) !void {
     var tex_b = try noapi.Texture.create(app.gpu, tex_desc);
     defer tex_b.destroy();
 
-    // ── Render state ───────────────────────────────────────
+    // ── Render state ───────────────────────────────
     const bindings = [_]noapi.VertexBinding{
         .{ .binding = 0, .stride = vertex_stride, .input_rate = 0 },
     };
     const attribs = [_]noapi.VertexAttribute{
-        .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = @offsetOf(Vertex, "pos") },
-        .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = @offsetOf(Vertex, "uv") },
+        .{
+            .location = 0,
+            .binding = 0,
+            .format = @intFromEnum(vk.Format.r32g32_sfloat),
+            .offset = @offsetOf(Vertex, "pos"),
+        },
+        .{
+            .location = 1,
+            .binding = 0,
+            .format = @intFromEnum(vk.Format.r32g32_sfloat),
+            .offset = @offsetOf(Vertex, "uv"),
+        },
     };
 
-    // ── Main loop ──────────────────────────────────────────
+    // ── Main loop ────────────────────────────────
     var textures_uploaded = false;
     var fade: f32 = 0;
-    // ── FPS counter ─────────────────────────────────────────
-    var fps_timer: u64 = sdl3.timer.getPerformanceCounter();
-    var fps_frames: u32 = 0;
-    const fps_freq: u64 = sdl3.timer.getPerformanceFrequency();
+    var timer = common.FrameTimer.init();
 
     while (true) {
         // Event handling
@@ -123,7 +143,10 @@ pub fn main(init: std.process.Init) !void {
                     if (ke.key == .escape) should_close = true;
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (we.id == win_id) app.surf.notifyResize(.{
+                        .width = @intCast(we.width),
+                        .height = @intCast(we.height),
+                    });
                 },
                 else => {},
             }
@@ -192,17 +215,7 @@ pub fn main(init: std.process.Init) !void {
 
         _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
 
-        // ── FPS output ──────────────────────────────────────
-        fps_frames += 1;
-        if (fps_frames == 60) {
-            const now = sdl3.timer.getPerformanceCounter();
-            const elapsed_ns = now - fps_timer;
-            const fps = @as(f64, @floatFromInt(fps_freq * fps_frames)) / @as(f64, @floatFromInt(elapsed_ns));
-            const ms = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(fps_freq * fps_frames)) * 1000.0;
-            std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
-            fps_timer = now;
-            fps_frames = 0;
-        }
+        timer.report();
     }
 
     try app.gpu.waitIdle();

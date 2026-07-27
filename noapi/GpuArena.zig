@@ -13,7 +13,9 @@ pub fn create(base: GpuPtr, size: usize) GpuArena {
     return .{ .base = base, .offset = 0, .size = size };
 }
 
-pub fn destroy(self: *GpuArena) void { self.* = undefined; }
+pub fn destroy(self: *GpuArena) void {
+    self.* = undefined;
+}
 pub fn alloc(self: *GpuArena, size: usize, alignment: u29) GpuPtr {
     const aligned = std.mem.alignForward(usize, self.offset, alignment);
     const end = aligned + size;
@@ -32,6 +34,10 @@ pub fn allocT(self: *GpuArena, comptime T: type, count: usize) GpuSlice(T) {
     return .{ .cpu = base[0..count], .gpu = self.base.gpu + @as(u64, @intCast(aligned)) };
 }
 
-pub fn reset(self: *GpuArena) void { self.offset = 0; }
+pub fn reset(self: *GpuArena) void {
+    self.offset = 0;
+}
 
-test { std.testing.refAllDecls(@This()); }
+test {
+    std.testing.refAllDecls(@This());
+}

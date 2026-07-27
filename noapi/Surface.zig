@@ -31,8 +31,21 @@ pub const SurfaceOptions = struct {
 gpu: *Gpu,
 index: u32,
 
+fn toVkPresentMode(mode: PresentMode) vk.PresentModeKHR {
+    return switch (mode) {
+        .fifo => .fifo_khr,
+        .mailbox => .mailbox_khr,
+        .immediate => .immediate_khr,
+        .fifo_relaxed => .fifo_relaxed_khr,
+    };
+}
+
 pub fn init(gpu: *Gpu, vk_surface: vk.SurfaceKHR, options: SurfaceOptions) !Surface {
-    const idx = try gpu.backend.addWindow(vk_surface, options.extent);
+    const idx = try gpu.backend.addWindow(
+        vk_surface,
+        options.extent,
+        toVkPresentMode(options.present_mode),
+    );
     return .{ .gpu = gpu, .index = idx };
 }
 
@@ -50,7 +63,8 @@ pub fn beginFrame(self: *Surface) !FrameSchedule {
 pub fn endFrame(self: *Surface, present: ?PresentInfo) !FrameResult {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    return try self.gpu.backend.endFrame(self.index, present);
+    const result = try self.gpu.backend.endFrame(self.index, present);
+    return result;
 }
 
 pub fn currentImage(self: *const Surface) TextureHandle {
@@ -69,6 +83,13 @@ pub fn surfaceSize(self: *const Surface) Extent2D {
 
 pub fn notifyResize(self: *Surface, extent: Extent2D) void {
     self.gpu.backend.notifyResize(self.index, extent);
+}
+
+/// CPU nanoseconds spent blocked on the GPU this frame (acquire/present/fence
+/// waits). Resets to 0 at the start of each beginFrame. 0 if unavailable.
+pub fn slopNs(self: *Surface) u64 {
+    if (self.index >= self.gpu.backend.windows.items.len) return 0;
+    return self.gpu.backend.windows.items[self.index].slop_ns;
 }
 
 test {

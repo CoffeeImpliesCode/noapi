@@ -24,12 +24,10 @@ const BufferDesc = @import("Buffer.zig").BufferDesc;
 const TextureDesc = @import("Texture.zig").TextureDesc;
 const TextureViewDesc = @import("Texture.zig").TextureViewDesc;
 const SamplerDesc = @import("Texture.zig").SamplerDesc;
-const Vertex = @import("Vertex.zig");
-const Rect = @import("Rect.zig");
-const VertexBinding = @import("VertexInput.zig").VertexBinding;
-const VertexAttribute = @import("VertexInput.zig").VertexAttribute;
 
 const tracy = @import("tracy");
+
+const log = std.log.scoped(.gpu);
 
 pub const Gpu = @This();
 
@@ -40,9 +38,10 @@ pub const SemaphoreHandle = VkBackend.SemaphoreHandle;
 pub const BufferHandle = VkBackend.BufferHandle;
 pub const QueueHandle = VkBackend.QueueHandle;
 
-backend: VkBackend,
+backend: *VkBackend,
 frames_in_flight: u5,
 frame_index: u5 = 0,
+allocator: std.mem.Allocator = std.heap.page_allocator,
 
 pub const Options = struct {
     frames_in_flight: u5 = 2,
@@ -55,6 +54,7 @@ pub const Options = struct {
     enable_nv_checkpoints: bool = false,
     enable_nv_diagnostics: bool = false,
     enable_device_fault: bool = false,
+    timestamp_queries: bool = false,
 };
 
 pub fn init(options: Options) !Gpu {
@@ -72,16 +72,19 @@ pub fn init(options: Options) !Gpu {
             .enable_nv_checkpoints = options.enable_nv_checkpoints,
             .enable_nv_diagnostics = options.enable_nv_diagnostics,
             .enable_device_fault = options.enable_device_fault,
+            .timestamp_queries = options.timestamp_queries,
         }),
         .frames_in_flight = options.frames_in_flight,
+        .allocator = options.allocator,
     };
 }
 
 pub fn deinit(self: *Gpu) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.backend.flushPendingFrees() catch {};
+    self.backend.flushPendingFrees() catch |err| log.warn("flushPendingFrees failed: {}", .{err});
     self.backend.deinit();
+    self.allocator.destroy(self.backend);
     self.* = undefined;
 }
 
@@ -204,74 +207,6 @@ pub fn descHeapCreate(self: *Gpu, texture_count: u32, texture_rw_count: u32, sam
 pub fn descHeapDestroy(self: *Gpu, heap: DescriptorHeap) void {
     self.backend.descHeapDestroy(heap.index);
 }
-pub fn drawTriangles(
-    self: *Gpu,
-    cmd: CommandBuffer,
-    texture: ?TextureHandle,
-    vertices: []const Vertex,
-    indices: []const u32,
-    clip_rect: ?Rect,
-) void {
-    if (vertices.len == 0 or indices.len == 0) return;
-    const vert_bytes = @sizeOf(Vertex) * vertices.len;
-    const idx_bytes = @sizeOf(u32) * indices.len;
-    const buf = self.gpuMalloc(@intCast(vert_bytes + idx_bytes), 64, .default) catch return;
-
-    @memcpy(buf.cpu[0..vert_bytes], @as([*]const u8, @ptrCast(vertices.ptr))[0..vert_bytes]);
-    @memcpy(buf.cpu[vert_bytes..][0..idx_bytes], @as([*]const u8, @ptrCast(indices.ptr))[0..idx_bytes]);
-
-    const vk_buf: vk.Buffer = @enumFromInt(buf.vk_buffer);
-    const vert_off: u64 = 0;
-    const idx_off: u64 = vert_bytes;
-
-    const bindings = [_]VertexBinding{.{ .binding = 0, .stride = @sizeOf(Vertex), .input_rate = 0 }};
-    const attribs = [_]VertexAttribute{
-        .{
-            .location = 0,
-            .binding = 0,
-            .format = @intFromEnum(vk.Format.r32g32_sfloat),
-            .offset = @offsetOf(Vertex, "position"),
-        },
-        .{
-            .location = 1,
-            .binding = 0,
-            .format = @intFromEnum(vk.Format.r32g32_sfloat),
-            .offset = @offsetOf(Vertex, "uv"),
-        },
-        .{
-            .location = 2,
-            .binding = 0,
-            .format = @intFromEnum(vk.Format.r8g8b8a8_unorm),
-            .offset = @offsetOf(Vertex, "color"),
-        },
-    };
-    self.backend.cmdSetVertexInput(cmd.handle, &bindings, &attribs);
-    self.backend.cmdBindVertexBuffer(cmd.handle, 0, vk_buf, vert_off);
-    self.backend.cmdBindIndexBuffer(cmd.handle, vk_buf, idx_off, .u32);
-    if (clip_rect) |cr| {
-        self.backend.cmdSetScissor(cmd.handle, .{ .x = cr.x, .y = cr.y, .width = cr.w, .height = cr.h });
-    }
-    if (texture) |tex| {
-        if (tex.texture.id != 0) {
-            const heap = self.descHeapCreate(1, 0, 1) catch return;
-            defer self.descHeapDestroy(heap);
-            const tex_view = self.textureViewDescriptor(
-                tex,
-                .{ .format = .default },
-            );
-            const sampler = self.samplerDescriptor(.{
-                .min_filter = .linear,
-                .mag_filter = .linear,
-                .mip_filter = .linear,
-            });
-            self.descHeapSetTextures(heap, 0, &.{tex_view});
-            self.descHeapSetSamplers(heap, 0, &.{sampler});
-            self.backend.cmdBindDescriptorSets(cmd.handle, heap.index);
-        }
-    }
-    self.backend.cmdDrawIndexed(cmd.handle, @intCast(indices.len), 1, 0, 0);
-}
-
 pub fn generateMipmaps(self: *Gpu, cmd: CommandBuffer, texture: Texture) void {
     // Ensure any prior writes to the texture are visible to the first blit
     self.backend.cmdBarrier(cmd.handle, .{ .transfer = true }, .{ .transfer = true }, .{});

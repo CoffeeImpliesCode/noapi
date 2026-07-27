@@ -31,6 +31,7 @@ noapi/
 | Change swapchain config | `SurfaceOptions` (present_mode) / `Gpu.Options` (frames_in_flight) |
 
 ## Conventions (specific to noapi/)
+- **MANDATORY — tools over shell**: file changes go through `edit`/`write` only. NEVER patch files with inline python/perl/sed/awk scripts, heredocs, or `echo >` redirection — this corrupts files and bypasses review. Read with `read`, search with `grep`/`glob`. Shell is for builds/tests and one-shot fact queries only. If an `edit` fails, read and retry with exact text — never fall back to scripting.
 - `*Options` structs for init config (never raw parameters)
 - `@enumFromInt(@intFromEnum(...))` ONLY when enum values match Vulkan exactly — use explicit switch otherwise
 - Enum values MUST match Vulkan's `i32` values when used with `@enumFromInt`:

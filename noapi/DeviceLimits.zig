@@ -1,3 +1,4 @@
+// zlint-disable unused-decls -- public API type, re-exported via root.zig
 //! Device limits — GPU capabilities queried at init time.
 const std = @import("std");
 const DeviceLimits = @This();
@@ -23,4 +24,6 @@ dynamic_rendering: bool = true,
 timeline_semaphore: bool = true,
 descriptor_indexing: bool = true,
 
-test { std.testing.refAllDecls(@This()); }
+test {
+    std.testing.refAllDecls(@This());
+}
