@@ -27,6 +27,19 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
     });
 
+    // ── common module (shared example helpers) ───────────
+    const common_mod = b.createModule(.{
+        .root_source_file = b.path("examples/common.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "noapi", .module = mod },
+            .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+            .{ .name = "tracy", .module = tracy.module("tracy") },
+            .{ .name = "tracy_impl", .module = tracy_impl },
+        },
+    });
+
     // ── noapi-test executable ─────────────────────────────
     const exe = b.addExecutable(.{
         .name = "noapi-test",
@@ -65,6 +78,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy_impl },
+                .{ .name = "common", .module = common_mod },
             },
         }),
         .use_llvm = true,
@@ -91,6 +105,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy_impl },
+                .{ .name = "common", .module = common_mod },
             },
         }),
         .use_llvm = true,
@@ -117,6 +132,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy_impl },
+                .{ .name = "common", .module = common_mod },
             },
         }),
         .use_llvm = true,
@@ -143,6 +159,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy_impl },
+                .{ .name = "common", .module = common_mod },
             },
         }),
         .use_llvm = true,
@@ -169,6 +186,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy_impl },
+                .{ .name = "common", .module = common_mod },
             },
         }),
         .use_llvm = true,
@@ -195,6 +213,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy_impl },
+                .{ .name = "common", .module = common_mod },
             },
         }),
         .use_llvm = true,
@@ -221,6 +240,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy_impl },
+                .{ .name = "common", .module = common_mod },
             },
         }),
         .use_llvm = true,

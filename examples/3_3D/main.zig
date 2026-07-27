@@ -4,18 +4,12 @@
 const std = @import("std");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
+const common = @import("common");
 const vk = noapi.vk;
 const Io = std.Io;
-pub const tracy_impl = @import("tracy_impl");
-pub const tracy = @import("tracy");
-pub const tracy_options: tracy.Options = .{
-    .on_demand = false,
-    .no_broadcast = false,
-    .only_localhost = false,
-    .only_ipv4 = false,
-    .delayed_init = false,
-    .manual_lifetime = false,
-};
+pub const tracy_impl = common.tracy_impl;
+pub const tracy = common.tracy;
+pub const tracy_options = common.tracy_options;
 
 const win_width: u32 = 1000;
 const win_height: u32 = 1000;
@@ -99,77 +93,44 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    try sdl3.hints.set(.video_driver, "wayland");
-    try sdl3.hints.set(.render_driver, "vulkan");
-    try sdl3.init(.{ .video = true, .events = true });
-    defer sdl3.quit(.{ .video = true, .events = true });
-
-    const sdl_win = try sdl3.video.Window.init("3D Cube", @intCast(win_width), @intCast(win_height), .{ .resizable = true });
-    try sdl_win.show();
-    defer sdl_win.deinit();
-
-    // ── Vulkan loader via SDL3 ───────────────────────────
-    try sdl3.vulkan.loadLibrary(null);
-    const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
-
-    const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
-    const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
-    exts_copy_global = exts_copy;
-
-    // ── GPU init ───────────────────────────────────────────
-    var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = frames_in_flight,
-        .app_name = "3D Cube",
-        .validation = true,
-        .loader = .{
-            .get_instance_proc_addr = @ptrCast(get_proc_addr),
-            .get_instance_extensions = &getExts,
-        },
-        .io = io,
-        .allocator = gpa,
-    });
-    defer gpu.deinit();
-
-    // ── Surface ────────────────────────────────────────────
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = win_width, .height = win_height }, .present_mode = .fifo });
-    defer surf.deinit();
-
-    const win_id = try sdl_win.getId();
+    var app = try common.platformInit("3D Cube", win_width, win_height, @intCast(frames_in_flight), io, gpa);
+    app.surf.gpu = &app.gpu; // fix dangling ptr: surf.gpu captured &local_gpu before App reached final stack addr
+    defer app.deinit();
+    try app.sdl_win.show();
+    const win_id = try app.sdl_win.getId();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/cube_vert.spv", .vertex, "main", "cube_vert");
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/cube_vert.spv", .vertex, "main", "cube_vert");
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/cube_frag.spv", .fragment, "main", "cube_frag");
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/cube_frag.spv", .fragment, "main", "cube_frag");
     defer frag_shader.destroy();
 
     // ── Depth texture ──────────────────────────────────────
-    var depth_handle = try gpu.textureCreate(.{
+    var depth_handle = try app.gpu.textureCreate(.{
         .dimensions = .{ win_width, win_height, 1 },
         .format = .d32_float,
         .usage = .{ .sampled = false, .depth_stencil_attachment = true },
     });
-    defer gpu.textureDestroy(depth_handle);
+    defer app.gpu.textureDestroy(depth_handle);
     var depth_size = [2]u32{ win_width, win_height };
 
     // ── GPU buffers ────────────────────────────────────────
     // Per-frame data buffer (positions + colors + matrices).
     const frame_data_size = @sizeOf(PerFrameData);
-    const frame_data_buf = try gpu.gpuMalloc(frame_data_size, 64, .default);
-    defer gpu.gpuFree(frame_data_buf);
+    const frame_data_buf = try app.gpu.gpuMalloc(frame_data_size, 64, .default);
+    defer app.gpu.gpuFree(frame_data_buf);
 
     // Index buffer.
     const idx_buf_size = @sizeOf(u32) * cube_indices;
-    const idx_buf = try gpu.gpuMalloc(idx_buf_size, 64, .default);
-    defer gpu.gpuFree(idx_buf);
+    const idx_buf = try app.gpu.gpuMalloc(idx_buf_size, 64, .default);
+    defer app.gpu.gpuFree(idx_buf);
 
     // Fill index buffer.
     @memcpy(idx_buf.cpu[0..idx_buf_size], std.mem.sliceAsBytes(&cube_index_data));
 
     // ── Semaphore for frame pacing ─────────────────────────
-    const frame_sem = try gpu.semaphoreCreate(0);
-    defer gpu.semaphoreDestroy(frame_sem);
+    const frame_sem = try app.gpu.semaphoreCreate(0);
+    defer app.gpu.semaphoreDestroy(frame_sem);
 
     // ── Camera state ───────────────────────────────────────
     var cam_pos: [3]f32 = .{ -1, 0, 0 };
@@ -206,13 +167,13 @@ pub fn main(init: std.process.Init) !void {
                 .mouse_button_down => |me| {
                     if (me.button == .right) {
                         right_click_pressed = true;
-                        try sdl3.mouse.setWindowRelativeMode(sdl_win, true);
+                        try sdl3.mouse.setWindowRelativeMode(app.sdl_win, true);
                     }
                 },
                 .mouse_button_up => |me| {
                     if (me.button == .right) {
                         right_click_pressed = false;
-                        try sdl3.mouse.setWindowRelativeMode(sdl_win, false);
+                        try sdl3.mouse.setWindowRelativeMode(app.sdl_win, false);
                     }
                 },
                 .mouse_motion => |mm| {
@@ -223,7 +184,7 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .window_resized => |we| {
                     if (we.id == win_id) {
-                        surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                        app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
                     }
                 },
                 else => {},
@@ -231,14 +192,14 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Begin frame ────────────────────────────────────
-        _ = surf.beginFrame() catch |e| {
+        _ = app.surf.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
         };
 
-        const sz = surf.surfaceSize();
+        const sz = app.surf.surfaceSize();
         if (sz.width == 0 or sz.height == 0) {
-            _ = try surf.endFrame(.{ .blit_to_swapchain = true });
+            _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
             continue;
         }
         const surf_w = sz.width;
@@ -246,9 +207,9 @@ pub fn main(init: std.process.Init) !void {
 
         // ── Resize depth texture if needed ─────────────────
         if (depth_size[0] != surf_w or depth_size[1] != surf_h) {
-            try gpu.waitIdle();
-            gpu.textureDestroy(depth_handle);
-            depth_handle = try gpu.textureCreate(.{
+            try app.gpu.waitIdle();
+            app.gpu.textureDestroy(depth_handle);
+            depth_handle = try app.gpu.textureCreate(.{
                 .dimensions = .{ surf_w, surf_h, 1 },
                 .format = .d32_float,
                 .usage = .{ .sampled = false, .depth_stencil_attachment = true },
@@ -317,8 +278,8 @@ pub fn main(init: std.process.Init) !void {
             @sin(cam_pitch),
         };
         const world_up: [3]f32 = .{ 0, 0, 1 };
-        const right = cross3(fwd, world_up);
-        const up = cross3(right, fwd);
+        const right = common.cross(fwd, world_up);
+        const up = common.cross(right, fwd);
 
         // View matrix: inverse of camera transform.
         // Column-major 4x4.
@@ -326,7 +287,7 @@ pub fn main(init: std.process.Init) !void {
             right[0],              up[0],              -fwd[0],            0,
             right[1],              up[1],              -fwd[1],            0,
             right[2],              up[2],              -fwd[2],            0,
-            -dot3(right, cam_pos), -dot3(up, cam_pos), dot3(fwd, cam_pos), 1,
+            -common.dot(right, cam_pos), -common.dot(up, cam_pos), common.dot(fwd, cam_pos), 1,
         };
 
         // ── Build projection matrix ────────────────────────
@@ -336,14 +297,7 @@ pub fn main(init: std.process.Init) !void {
         const fov_y: f32 = std.math.pi / 3.0; // 60°
         const near_z: f32 = 0.1;
         const far_z: f32 = 100.0;
-        const f = 1.0 / @tan(fov_y / 2.0);
-
-        var proj: [16]f32 = .{
-            f / aspect, 0, 0,                                    0,
-            0,          f, 0,                                    0,
-            0,          0, -far_z / (far_z - near_z),            -1,
-            0,          0, -(far_z * near_z) / (far_z - near_z), 0,
-        };
+        var proj = common.perspective(fov_y, aspect, near_z, far_z);
 
         const s: f32 = 0.3;
         const model: [16]f32 = .{
@@ -362,8 +316,8 @@ pub fn main(init: std.process.Init) !void {
         @memcpy(&pfd.view_to_proj, &proj);
 
         // ── Render ─────────────────────────────────────────
-        const sc = surf.currentImage();
-        var cmd = surf.commandsBegin();
+        const sc = app.surf.currentImage();
+        var cmd = app.surf.commandsBegin();
 
         cmd.beginRendering(.{
             .color_attachments = &.{
@@ -395,13 +349,13 @@ pub fn main(init: std.process.Init) !void {
         cmd.endRendering();
 
         frame_counter += 1;
-        cmd.addSignalSemaphore(surf.index, frame_sem, frame_counter);
+        cmd.addSignalSemaphore(app.surf.index, frame_sem, frame_counter);
 
-        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
 
         // Frame pacing: wait if GPU is N frames ahead.
         if (frame_counter >= frames_in_flight) {
-            try gpu.semaphoreWait(frame_sem, frame_counter - frames_in_flight + 1);
+            try app.gpu.semaphoreWait(frame_sem, frame_counter - frames_in_flight + 1);
         }
 
         // ── FPS output ──────────────────────────────────────
@@ -419,35 +373,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try gpu.waitIdle();
+    try app.gpu.waitIdle();
 }
 
-fn cross3(a: [3]f32, b: [3]f32) [3]f32 {
-    return .{
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    };
-}
 
-fn dot3(a: [3]f32, b: [3]f32) f32 {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-fn dot4(a: [4]f32, b: [4]f32) f32 {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
-}
-
-fn neg3(a: [3]f32) [3]f32 {
-    return .{ -a[0], -a[1], -a[2] };
-}
-
-fn neg4(a: [4]f32) [4]f32 {
-    return .{ -a[0], -a[1], -a[2], -a[3] };
-}
-
-var exts_copy_global: []const [*:0]const u8 = &.{};
-
-fn getExts() []const [*:0]const u8 {
-    return exts_copy_global;
-}

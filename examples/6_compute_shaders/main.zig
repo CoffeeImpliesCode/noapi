@@ -7,19 +7,13 @@
 const std = @import("std");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
+const common = @import("common");
 const vk = noapi.vk;
 const DescriptorPool = noapi.DescriptorPool;
 const Io = std.Io;
-pub const tracy_impl = @import("tracy_impl");
-pub const tracy = @import("tracy");
-pub const tracy_options: tracy.Options = .{
-    .on_demand = false,
-    .no_broadcast = false,
-    .only_localhost = false,
-    .only_ipv4 = false,
-    .delayed_init = false,
-    .manual_lifetime = false,
-};
+pub const tracy_impl = common.tracy_impl;
+pub const tracy = common.tracy;
+pub const tracy_options = common.tracy_options;
 
 const start_width = 1000;
 const start_height = 1000;
@@ -30,73 +24,39 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    try sdl3.hints.set(.video_driver, "wayland");
-    try sdl3.hints.set(.render_driver, "vulkan");
-    try sdl3.init(.{ .video = true, .events = true });
-    defer sdl3.quit(.{ .video = true, .events = true });
-
-    const sdl_win = try sdl3.video.Window.init("Compute Shader", start_width, start_height, .{
-        .resizable = true,
-        .high_pixel_density = true,
-    });
-    try sdl_win.show();
-
-    // ── Vulkan loader via SDL3 ───────────────────────────
-    try sdl3.vulkan.loadLibrary(null);
-    const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
-
-    const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
-    const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
-    exts_copy_global = exts_copy;
-
-    // ── GPU init ───────────────────────────────────────────
-    var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = frames_in_flight,
-        .app_name = "6_compute_shaders",
-        .validation = true,
-        .loader = .{
-            .get_instance_proc_addr = @ptrCast(get_proc_addr),
-            .get_instance_extensions = &getExts,
-        },
-        .io = io,
-        .allocator = gpa,
-    });
-    defer gpu.deinit();
-
-    // ── Surface ────────────────────────────────────────────
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = start_width, .height = start_height } });
-    defer surf.deinit();
+    var app = try common.platformInit("6_compute_shaders", start_width, start_height, frames_in_flight, io, gpa);
+    defer app.deinit();
+    try app.sdl_win.show();
+    const win_id = try app.sdl_win.getId();
 
     // ── Shaders ────────────────────────────────────────────
-    const comp_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/compute_comp.spv", .compute, "main", "compute");
+    const comp_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/compute_comp.spv", .compute, "main", "compute");
     defer comp_shader.destroy();
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/fullscreen_quad_vert.spv", .vertex, "main", "fullscreen_quad");
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/fullscreen_quad_vert.spv", .vertex, "main", "fullscreen_quad");
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/tex_sample_frag.spv", .fragment, "main", "tex_sample");
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/tex_sample_frag.spv", .fragment, "main", "tex_sample");
     defer frag_shader.destroy();
 
     // ── Descriptor pool ────────────────────────────────────
-    var pool = try DescriptorPool.init(&gpu, 1, 1, 1);
+    var pool = try DescriptorPool.init(&app.gpu, 1, 1, 1);
     defer pool.deinit();
 
     // ── Compute output texture (storage + sampled) ─────────
-    var surface_size = surf.surfaceSize();
-    var output_tex = try gpu.textureCreate(.{
+    var surface_size = app.surf.surfaceSize();
+    var output_tex = try app.gpu.textureCreate(.{
         .dimensions = .{ surface_size.width, surface_size.height, 1 },
         .format = .rgba8_unorm,
         .usage = .{ .storage = true, .sampled = true },
     });
-    defer gpu.textureDestroy(output_tex);
+    defer app.gpu.textureDestroy(output_tex);
 
     // ── Allocate descriptor slots ──────────────────────────
-    var tex_idx = pool.allocTexture(output_tex, gpu.samplerDescriptor(.{}), .@"2d");
+    var tex_idx = pool.allocTexture(output_tex, app.gpu.samplerDescriptor(.{}), .@"2d");
     var tex_rw_idx = pool.allocTextureRw(output_tex, .@"2d");
 
     // ── Indirect dispatch buffer ───────────────────────────
-    const indirect_buf = try gpu.gpuMalloc(@sizeOf(noapi.DispatchIndirectCommand), 4, .default);
-    defer gpu.gpuFree(indirect_buf);
+    const indirect_buf = try app.gpu.gpuMalloc(@sizeOf(noapi.DispatchIndirectCommand), 4, .default);
+    defer app.gpu.gpuFree(indirect_buf);
 
     // ── Timing ─────────────────────────────────────────────
     const ts_freq = sdl3.timer.getPerformanceFrequency();
@@ -104,12 +64,11 @@ pub fn main(init: std.process.Init) !void {
     var total_time: f32 = 0;
 
     // ── Frame pacing semaphore ─────────────────────────────
-    const frame_sem = try gpu.semaphoreCreate(0);
-    defer gpu.semaphoreDestroy(frame_sem);
+    const frame_sem = try app.gpu.semaphoreCreate(0);
+    defer app.gpu.semaphoreDestroy(frame_sem);
     var next_frame: u64 = 1;
 
     // ── Main loop ──────────────────────────────────────────
-    const win_id = try sdl_win.getId();
     var should_close = false;
     // ── FPS counter ─────────────────────────────────────────
     var fps_timer: u64 = sdl3.timer.getPerformanceCounter();
@@ -127,14 +86,14 @@ pub fn main(init: std.process.Init) !void {
                     if (ke.key == .escape) should_close = true;
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (we.id == win_id) app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
                 },
                 else => {},
             }
         }
 
         // Skip if minimized
-        const flags = sdl_win.getFlags();
+        const flags = app.sdl_win.getFlags();
         if (flags.minimized) {
             sdl3.timer.delayMilliseconds(16);
             continue;
@@ -142,29 +101,29 @@ pub fn main(init: std.process.Init) !void {
 
         // Frame pacing
         if (next_frame > frames_in_flight) {
-            try gpu.semaphoreWait(frame_sem, next_frame - frames_in_flight);
+            try app.gpu.semaphoreWait(frame_sem, next_frame - frames_in_flight);
         }
 
         // Begin frame (triggers swapchain recreation if resized)
-        _ = surf.beginFrame() catch |e| {
+        _ = app.surf.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
         };
 
         // Handle resize
-        const new_size = surf.surfaceSize();
+        const new_size = app.surf.surfaceSize();
         if (new_size.width != surface_size.width or new_size.height != surface_size.height) {
             surface_size = new_size;
-            try gpu.waitIdle();
+            try app.gpu.waitIdle();
             pool.freeTexture(tex_idx);
             pool.freeTextureRw(tex_rw_idx);
-            gpu.textureDestroy(output_tex);
-            output_tex = try gpu.textureCreate(.{
+            app.gpu.textureDestroy(output_tex);
+            output_tex = try app.gpu.textureCreate(.{
                 .dimensions = .{ surface_size.width, surface_size.height, 1 },
                 .format = .rgba8_unorm,
                 .usage = .{ .storage = true, .sampled = true },
             });
-            tex_idx = pool.allocTexture(output_tex, gpu.samplerDescriptor(.{}), .@"2d");
+            tex_idx = pool.allocTexture(output_tex, app.gpu.samplerDescriptor(.{}), .@"2d");
             tex_rw_idx = pool.allocTextureRw(output_tex, .@"2d");
         }
 
@@ -183,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
         const num_groups_x = (surface_size.width + group_size_x - 1) / group_size_x;
         const num_groups_y = (surface_size.height + group_size_y - 1) / group_size_y;
 
-        var cmd = surf.commandsBegin();
+        var cmd = app.surf.commandsBegin();
         cmd.bindDescriptorSets(pool.heap);
         cmd.setComputeShader(comp_shader);
 
@@ -209,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
         cmd.barrier(.{ .compute = true }, .{ .fragment = true }, .{});
 
         // ── Render compute output as fullscreen quad ────────
-        const sc = surf.currentImage();
+        const sc = app.surf.currentImage();
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{ 0, 0, 0, 1 } },
         }, .render_area_size = .{ surface_size.width, surface_size.height } });
@@ -222,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Signal semaphore and present
         cmd.addSignalSemaphore(0, frame_sem, next_frame);
-        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
         next_frame += 1;
 
         // ── FPS output ──────────────────────────────────────
@@ -240,11 +199,5 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try gpu.waitIdle();
-}
-
-var exts_copy_global: []const [*:0]const u8 = &.{};
-
-fn getExts() []const [*:0]const u8 {
-    return exts_copy_global;
+    try app.gpu.waitIdle();
 }

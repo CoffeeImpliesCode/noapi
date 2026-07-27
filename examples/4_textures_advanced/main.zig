@@ -3,76 +3,32 @@
 //! No external assets required.
 
 const std = @import("std");
+const common = @import("common");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const vk = noapi.vk;
 const DescriptorPool = noapi.DescriptorPool;
 const Io = std.Io;
-pub const tracy_impl = @import("tracy_impl");
-pub const tracy = @import("tracy");
-pub const tracy_options: tracy.Options = .{
-    .on_demand = false,
-    .no_broadcast = false,
-    .only_localhost = false,
-    .only_ipv4 = false,
-    .delayed_init = false,
-    .manual_lifetime = false,
-};
+pub const tracy_impl = common.tracy_impl;
+pub const tracy = common.tracy;
+pub const tracy_options = common.tracy_options;
 
 const volume_res: u32 = 128;
 const window_width: u32 = 1000;
 const window_height: u32 = 1000;
 
-var exts_copy_global: []const [*:0]const u8 = &.{};
-
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    try sdl3.hints.set(.video_driver, "wayland");
-    try sdl3.hints.set(.render_driver, "vulkan");
-    try sdl3.init(.{ .video = true, .events = true });
-    defer sdl3.quit(.{ .video = true, .events = true });
-
-    const sdl_win = try sdl3.video.Window.init("Textures (Advanced) — 3D Volume", window_width, window_height, .{ .resizable = true });
-    try sdl_win.show();
-
-    // ── Vulkan loader via SDL3 ───────────────────────────
-    try sdl3.vulkan.loadLibrary(null);
-    const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
-
-    const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
-    const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
-    exts_copy_global = exts_copy;
-
-    // ── GPU init ───────────────────────────────────────────
-    var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = 2,
-        .app_name = "noapi textures_advanced",
-        .validation = true,
-        .loader = .{
-            .get_instance_proc_addr = @ptrCast(get_proc_addr),
-            .get_instance_extensions = &struct {
-                fn getExts() []const [*:0]const u8 {
-                    return exts_copy_global;
-                }
-            }.getExts,
-        },
-        .io = io,
-        .allocator = gpa,
-    });
-    defer gpu.deinit();
-
-    // ── Window surface ────────────────────────────────────
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = window_width, .height = window_height } });
-    defer surf.deinit();
+    var app = try common.platformInit("noapi textures_advanced", window_width, window_height, 2, io, gpa);
+    defer app.deinit();
+    try app.sdl_win.show();
 
     // ── Shaders ────────────────────────────────────────────
-    const cloud_vert = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/cloud_vert.spv", .vertex, "main", "cloud_vert");
+    const cloud_vert = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/cloud_vert.spv", .vertex, "main", "cloud_vert");
     defer cloud_vert.destroy();
-    const cloud_frag = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/cloud_frag.spv", .fragment, "main", "cloud_frag");
+    const cloud_frag = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/cloud_frag.spv", .fragment, "main", "cloud_frag");
     defer cloud_frag.destroy();
 
     // ── 3D cloud texture ──────────────────────────────────
@@ -83,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
     generateCloudVolume(cloud_data);
 
     // Create 3D texture on GPU
-    var cloud_tex = try noapi.Texture.OwnedTexture.allocAndCreate(&gpu, .{
+    var cloud_tex = try noapi.Texture.OwnedTexture.allocAndCreate(&app.gpu, .{
         .type = .@"3d",
         .dimensions = .{ volume_res, volume_res, volume_res },
         .format = .r8_unorm,
@@ -93,11 +49,10 @@ pub fn main(init: std.process.Init) !void {
 
     // Upload cloud data via staging buffer
     {
-        const staging = try gpu.gpuMalloc(volume_bytes, 16, .default);
-        defer gpu.gpuFree(staging);
-        @memcpy(staging.cpu[0..volume_bytes], cloud_data);
+        const staging = try common.gpuCreate(&app.gpu, u8, cloud_data, 16);
+        defer app.gpu.gpuFree(staging);
 
-        var cmd = try gpu.commandsBegin();
+        var cmd = try app.gpu.commandsBegin();
         cmd.copyToTexture(cloud_tex.texture, staging, .{
             .size = .{ volume_res, volume_res, volume_res },
             .layer_count = 1,
@@ -105,15 +60,15 @@ pub fn main(init: std.process.Init) !void {
         cmd.barrier(.{ .transfer = true }, .{ .fragment = true }, .{});
         // Submit and wait for upload to complete
         // queueSubmit internally ends the CB, then submits
-        try gpu.queueSubmit(&.{cmd});
-        try gpu.waitIdle();
+        try app.gpu.queueSubmit(&.{cmd});
+        try app.gpu.waitIdle();
     }
 
     // ── Descriptor pool ────────────────────────────────────
-    var pool = try DescriptorPool.init(&gpu, 1, 0, 1);
+    var pool = try DescriptorPool.init(&app.gpu, 1, 0, 1);
     defer pool.deinit();
 
-    _ = pool.allocTexture(cloud_tex.texture.handle, gpu.samplerDescriptor(.{
+    _ = pool.allocTexture(cloud_tex.texture.handle, app.gpu.samplerDescriptor(.{
         .min_filter = .linear,
         .mag_filter = .linear,
         .mip_filter = .linear,
@@ -123,12 +78,12 @@ pub fn main(init: std.process.Init) !void {
     }), .@"3d");
 
     // ── Render loop ────────────────────────────────────────
-    const win_id = try sdl_win.getId();
+    const win_id = try app.sdl_win.getId();
     var should_close = false;
     var time_sec: f32 = 0;
     var sem_val: u64 = 0;
-    const test_sem = try gpu.semaphoreCreate(0);
-    defer gpu.semaphoreDestroy(test_sem);
+    const test_sem = try app.gpu.semaphoreCreate(0);
+    defer app.gpu.semaphoreDestroy(test_sem);
 
     // ── FPS counter ─────────────────────────────────────────
     var fps_timer: u64 = sdl3.timer.getPerformanceCounter();
@@ -147,22 +102,22 @@ pub fn main(init: std.process.Init) !void {
                     if (ke.key == .escape) should_close = true;
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (we.id == win_id) app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
                 },
                 else => {},
             }
         }
 
         time_sec += 1.0 / 60.0;
-        _ = surf.beginFrame() catch |e| {
+        _ = app.surf.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
         };
 
-        const surface_size = surf.surfaceSize();
-        var cmd = surf.commandsBegin();
+        const surface_size = app.surf.surfaceSize();
+        var cmd = app.surf.commandsBegin();
 
-        const sc = surf.currentImage();
+        const sc = app.surf.currentImage();
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{ 0.05, 0.05, 0.1, 1.0 } },
         }, .render_area_size = .{ surface_size.width, surface_size.height } });
@@ -211,10 +166,10 @@ pub fn main(init: std.process.Init) !void {
         cmd.endRendering();
 
         sem_val += 1;
-        cmd.addWaitSemaphore(surf.index, test_sem, sem_val - 1);
-        cmd.addSignalSemaphore(surf.index, test_sem, sem_val);
+        cmd.addWaitSemaphore(app.surf.index, test_sem, sem_val - 1);
+        cmd.addSignalSemaphore(app.surf.index, test_sem, sem_val);
 
-        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
 
         // ── FPS output ──────────────────────────────────────
         fps_frames += 1;
@@ -231,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try gpu.waitIdle();
+    try app.gpu.waitIdle();
 }
 
 /// Generate a 128×128×128 cloud volume using FBM value noise.

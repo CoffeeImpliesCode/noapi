@@ -3,20 +3,14 @@
 //! Renders 32 animated triangles arranged in a circle using indirect draw commands.
 
 const std = @import("std");
+const common = @import("common");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const vk = noapi.vk;
 const Io = std.Io;
-pub const tracy_impl = @import("tracy_impl");
-pub const tracy = @import("tracy");
-pub const tracy_options: tracy.Options = .{
-    .on_demand = false,
-    .no_broadcast = false,
-    .only_localhost = false,
-    .only_ipv4 = false,
-    .delayed_init = false,
-    .manual_lifetime = false,
-};
+pub const tracy_impl = common.tracy_impl;
+pub const tracy = common.tracy;
+pub const tracy_options = common.tracy_options;
 
 const num_triangles: u32 = 32;
 const window_width: u32 = 1000;
@@ -46,78 +40,46 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    try sdl3.hints.set(.video_driver, "wayland");
-    try sdl3.hints.set(.render_driver, "vulkan");
-    try sdl3.init(.{ .video = true, .events = true });
-    defer sdl3.quit(.{ .video = true, .events = true });
-
-    const sdl_win = try sdl3.video.Window.init("Indirect Triangles", window_width, window_height, .{ .resizable = true });
-    try sdl_win.show();
-
-    // ── Vulkan loader via SDL3 ───────────────────────────
-    try sdl3.vulkan.loadLibrary(null);
-    const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
-
-    const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
-    const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
-    exts_copy_global = exts_copy;
-
-    // ── GPU init ───────────────────────────────────────────
-    var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = frames_in_flight,
-        .app_name = "Indirect Triangles",
-        .validation = true,
-        .loader = .{
-            .get_instance_proc_addr = @ptrCast(get_proc_addr),
-            .get_instance_extensions = &getExts,
-        },
-        .io = io,
-        .allocator = gpa,
-    });
-    defer gpu.deinit();
-
-    // ── Surface ────────────────────────────────────────────
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = window_width, .height = window_height } });
-    defer surf.deinit();
+    var app = try common.platformInit("Indirect Triangles", window_width, window_height, frames_in_flight, io, gpa);
+    defer app.deinit();
+    try app.sdl_win.show();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/indirect_tri_vert.spv", .vertex, "main", "indirect_tri_vert");
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/indirect_tri_vert.spv", .vertex, "main", "indirect_tri_vert");
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/indirect_tri_frag.spv", .fragment, "main", "indirect_tri_frag");
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/indirect_tri_frag.spv", .fragment, "main", "indirect_tri_frag");
     defer frag_shader.destroy();
 
     // ── Vertex buffer (single triangle shared by all draws) ─
-    const vert_buf = try gpu.gpuMalloc(@sizeOf([3]f32) * 3, 16, .default);
-    defer gpu.gpuFree(vert_buf);
+    const vert_buf = try app.gpu.gpuMalloc(@sizeOf([3]f32) * 3, 16, .default);
+    defer app.gpu.gpuFree(vert_buf);
     const verts: [*][3]f32 = @ptrCast(@alignCast(vert_buf.cpu));
     verts[0] = .{ -0.5, 0.5, 0.0 };
     verts[1] = .{ 0.0, -0.5, 0.0 };
     verts[2] = .{ 0.5, 0.5, 0.0 };
 
     // ── Vertex data struct (pointer to vertex array) ───────
-    const vert_data_buf = try gpu.gpuMalloc(@sizeOf(VertexData), 8, .default);
-    defer gpu.gpuFree(vert_data_buf);
+    const vert_data_buf = try app.gpu.gpuMalloc(@sizeOf(VertexData), 8, .default);
+    defer app.gpu.gpuFree(vert_data_buf);
     const vert_data_ptr: *VertexData = @ptrCast(@alignCast(vert_data_buf.cpu));
     vert_data_ptr.* = .{ .verts = vert_buf.gpu };
 
     // ── Index buffer ───────────────────────────────────────
-    const idx_buf = try gpu.gpuMalloc(@sizeOf(u32) * 3, 4, .default);
-    defer gpu.gpuFree(idx_buf);
+    const idx_buf = try app.gpu.gpuMalloc(@sizeOf(u32) * 3, 4, .default);
+    defer app.gpu.gpuFree(idx_buf);
     const indices: [*]u32 = @ptrCast(@alignCast(idx_buf.cpu));
     indices[0] = 0;
     indices[1] = 2;
     indices[2] = 1;
 
     // ── Indirect data buffer (32 draws with per-draw data) ─
-    const indirect_buf = try gpu.gpuMalloc(@sizeOf(IndirectDraw) * num_triangles, 16, .default);
-    defer gpu.gpuFree(indirect_buf);
+    const indirect_buf = try app.gpu.gpuMalloc(@sizeOf(IndirectDraw) * num_triangles, 16, .default);
+    defer app.gpu.gpuFree(indirect_buf);
     const indirect_draws: [*]IndirectDraw = @ptrCast(@alignCast(indirect_buf.cpu));
 
     // ── Count buffer (separate buffer for draw count) ──────
-    const draw_count_buf = try gpu.gpuMalloc(4, 4, .default);
-    defer gpu.gpuFree(draw_count_buf);
+    const draw_count_buf = try app.gpu.gpuMalloc(4, 4, .default);
+    defer app.gpu.gpuFree(draw_count_buf);
     @as(*u32, @ptrCast(@alignCast(draw_count_buf.cpu))).* = num_triangles;
 
     const circle_radius: f32 = 0.6;
@@ -147,14 +109,14 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ── Count buffer (for multi-draw) ──────────────────────
-    const count_buf = try gpu.gpuMalloc(@sizeOf(u32), 4, .default);
-    defer gpu.gpuFree(count_buf);
+    const count_buf = try app.gpu.gpuMalloc(@sizeOf(u32), 4, .default);
+    defer app.gpu.gpuFree(count_buf);
     const count_ptr: *u32 = @ptrCast(@alignCast(count_buf.cpu));
     count_ptr.* = num_triangles;
 
     // ── Semaphore for frame pacing ─────────────────────────
-    const frame_sem = try gpu.semaphoreCreate(0);
-    defer gpu.semaphoreDestroy(frame_sem);
+    const frame_sem = try app.gpu.semaphoreCreate(0);
+    defer app.gpu.semaphoreDestroy(frame_sem);
 
     // ── Main loop ──────────────────────────────────────────
     // ── FPS counter ─────────────────────────────────────────
@@ -171,13 +133,13 @@ pub fn main(init: std.process.Init) !void {
             switch (ev) {
                 .quit => should_close = true,
                 .window_close_requested => |we| {
-                    if (we.id == try sdl_win.getId()) should_close = true;
+                    if (we.id == try app.sdl_win.getId()) should_close = true;
                 },
                 .key_down => |ke| {
                     if (ke.key == .escape) should_close = true;
                 },
                 .window_resized => |we| {
-                    surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
                 },
                 else => {},
             }
@@ -186,18 +148,18 @@ pub fn main(init: std.process.Init) !void {
 
         // Frame pacing
         if (next_frame > frames_in_flight) {
-            try gpu.semaphoreWait(frame_sem, next_frame - frames_in_flight);
+            try app.gpu.semaphoreWait(frame_sem, next_frame - frames_in_flight);
         }
 
         // Begin frame
-        const schedule = surf.beginFrame() catch |e| {
+        const schedule = app.surf.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
         };
         _ = schedule;
 
         time_sec += 1.0 / 60.0;
-        const surface_size = surf.surfaceSize();
+        const surface_size = app.surf.surfaceSize();
 
         // Animate: rotate triangles around the circle
         const rotation = time_sec * 0.5;
@@ -209,8 +171,8 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // Record commands
-        var cmd = surf.commandsBegin();
-        const sc = surf.currentImage();
+        var cmd = app.surf.commandsBegin();
+        const sc = app.surf.currentImage();
 
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{
@@ -243,8 +205,8 @@ pub fn main(init: std.process.Init) !void {
         cmd.endRendering();
 
         // Signal semaphore and present
-        cmd.addSignalSemaphore(surf.index, frame_sem, next_frame);
-        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
+        cmd.addSignalSemaphore(app.surf.index, frame_sem, next_frame);
+        _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
         next_frame += 1;
 
         // ── FPS output ──────────────────────────────────────
@@ -260,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try gpu.waitIdle();
+    try app.gpu.waitIdle();
 }
 
 // Convert HSL to RGB (hue: 0-1, saturation: 0-1, lightness: 0-1)
@@ -283,10 +245,4 @@ fn hslToRgb(h: f32, s: f32, l: f32) [3]f32 {
         .{ c, 0.0, x };
 
     return .{ rgb[0] + m, rgb[1] + m, rgb[2] + m };
-}
-
-var exts_copy_global: []const [*:0]const u8 = &.{};
-
-fn getExts() []const [*:0]const u8 {
-    return exts_copy_global;
 }

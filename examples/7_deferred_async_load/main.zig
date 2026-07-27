@@ -12,16 +12,11 @@ const noapi = @import("noapi");
 const vk = noapi.vk;
 const DescriptorPool = noapi.DescriptorPool;
 const Io = std.Io;
-pub const tracy_impl = @import("tracy_impl");
-pub const tracy = @import("tracy");
-pub const tracy_options: tracy.Options = .{
-    .on_demand = false,
-    .no_broadcast = false,
-    .only_localhost = false,
-    .only_ipv4 = false,
-    .delayed_init = false,
-    .manual_lifetime = false,
-};
+const common = @import("common");
+
+pub const tracy_impl = common.tracy_impl;
+pub const tracy = common.tracy;
+pub const tracy_options = common.tracy_options;
 
 const start_width = 1000;
 const start_height = 1000;
@@ -163,10 +158,6 @@ pub fn main(init: std.process.Init) !void {
         gb_depth.freeAndDestroy();
     }
 
-    // ── Timing ─────────────────────────────────────────────
-    const ts_freq = sdl3.timer.getPerformanceFrequency();
-    var now_ts = sdl3.timer.getPerformanceCounter();
-
     // ── Push constant structs ──────────────────────────────
     const VertData = extern struct {
         positions: u64,
@@ -261,12 +252,6 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Delta time ─────────────────────────────────────
-        const last_ts = now_ts;
-        now_ts = sdl3.timer.getPerformanceCounter();
-        const delta = @as(f32, @floatCast(@as(f64, @floatFromInt(now_ts - last_ts)) / @as(f64, @floatFromInt(ts_freq))));
-        const max_dt: f32 = 1.0 / 10.0;
-        const dt = @min(max_dt, delta);
-
         // DIAG: check device on first frame
         if (fps_frames == 0) try gpu.waitIdle();
 
@@ -304,8 +289,8 @@ pub fn main(init: std.process.Init) !void {
 
         // ── Camera ──────────────────────────────────────────
         const aspect = @as(f32, @floatFromInt(window_w)) / @as(f32, @floatFromInt(window_h));
-        const view = cameraMatrix(dt);
-        const proj = perspectiveMatrix(59.0 * std.math.pi / 180.0, aspect, 0.1, 1000.0);
+        const view = common.lookAt(.{ 3.0, 2.0, 3.0 }, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = common.perspective(59.0 * std.math.pi / 180.0, aspect, 0.1, 1000.0);
 
         var cmd = surf.commandsBegin();
 
@@ -329,8 +314,8 @@ pub fn main(init: std.process.Init) !void {
         cmd.setDepthState(.{ .mode = .{ .read = true, .write = true }, .compare = .less });
         cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .back, .front_face = .clockwise });
 
-        const model = mat4Identity();
-        const model_normal = mat4Transpose(mat4Invert(model));
+        const model = common.id();
+        const model_normal = common.transpose(common.inv(model));
 
         const vert_data_ptr: *VertData = @ptrCast(@alignCast(push_buf.cpu));
         const frag_data_ptr: *FragData = @ptrCast(@alignCast(push_buf.cpu + vert_data_size));
@@ -389,9 +374,15 @@ pub fn main(init: std.process.Init) !void {
         const fsq_frag_ptr: *FsqFragData = @ptrCast(@alignCast(push_buf.cpu + total_size));
 
         // Extract view→world basis vectors from the view matrix
-        const v2w_r0 = view[0]; const v2w_r1 = view[4]; const v2w_r2 = view[8];
-        const v2w_u0 = view[1]; const v2w_u1 = view[5]; const v2w_u2 = view[9];
-        const v2w_f0 = -view[2]; const v2w_f1 = -view[6]; const v2w_f2 = -view[10];
+        const v2w_r0 = view[0];
+        const v2w_r1 = view[4];
+        const v2w_r2 = view[8];
+        const v2w_u0 = view[1];
+        const v2w_u1 = view[5];
+        const v2w_u2 = view[9];
+        const v2w_f0 = -view[2];
+        const v2w_f1 = -view[6];
+        const v2w_f2 = -view[10];
 
         const w_f: f32 = @floatFromInt(surface_size.width);
         const h_f: f32 = @floatFromInt(surface_size.height);
@@ -400,8 +391,8 @@ pub fn main(init: std.process.Init) !void {
 
         fsq_frag_ptr.* = .{
             .v2w_right = .{ v2w_r0, v2w_r1, v2w_r2, 0 },
-            .v2w_up    = .{ v2w_u0, v2w_u1, v2w_u2, 0 },
-            .v2w_fwd   = .{ v2w_f0, v2w_f1, v2w_f2, 0 },
+            .v2w_up = .{ v2w_u0, v2w_u1, v2w_u2, 0 },
+            .v2w_fwd = .{ v2w_f0, v2w_f1, v2w_f2, 0 },
             .cam_pos = .{ 3.0, 2.0, 3.0 },
             .gbuffer_albedo = gbuffer_albedo_idx,
             .gbuffer_albedo_sampler = gbuffer_albedo_idx,
@@ -680,85 +671,6 @@ fn loadEnvMap(gpa: std.mem.Allocator, io: Io, gpu: *noapi.Gpu, pool: *Descriptor
     const idx = pool.allocTexture(tex.handle, samp_handle, .@"2d");
     return idx;
 }
-
-// ── Matrix helpers ───────────────────────────────────────────
-
-fn mat4Identity() [16]f32 {
-    return .{
-        1, 0, 0, 0,
-        0, 1, 0, 0,
-        0, 0, 1, 0,
-        0, 0, 0, 1,
-    };
-}
-
-fn mat4Invert(m: [16]f32) [16]f32 {
-    _ = m;
-    return mat4Identity();
-}
-
-fn mat4Transpose(m: [16]f32) [16]f32 {
-    return .{
-        m[0], m[4], m[8],  m[12],
-        m[1], m[5], m[9],  m[13],
-        m[2], m[6], m[10], m[14],
-        m[3], m[7], m[11], m[15],
-    };
-}
-
-fn cameraMatrix(dt: f32) [16]f32 {
-    _ = dt;
-    const eye_x: f32 = 3.0;
-    const eye_y: f32 = 2.0;
-    const eye_z: f32 = 3.0;
-    const center: [3]f32 = .{ 0, 0, 0 };
-    const up: [3]f32 = .{ 0, 1, 0 };
-
-    const fwd = normalize3(.{ center[0] - eye_x, center[1] - eye_y, center[2] - eye_z });
-    const right = normalize3(cross3(fwd, up));
-    const cam_up = cross3(right, fwd);
-
-    return .{
-        right[0],                               cam_up[0],                               -fwd[0],                             0,
-        right[1],                               cam_up[1],                               -fwd[1],                             0,
-        right[2],                               cam_up[2],                               -fwd[2],                             0,
-        -dot3(right, .{ eye_x, eye_y, eye_z }), -dot3(cam_up, .{ eye_x, eye_y, eye_z }), dot3(fwd, .{ eye_x, eye_y, eye_z }), 1,
-    };
-}
-
-fn perspectiveMatrix(fov_y: f32, aspect: f32, near: f32, far: f32) [16]f32 {
-    // Row-major storage; GLSL reads as column-major.
-    // The negative signs in row 2 correct the Z mapping to Vulkan's [0,1] depth range.
-    const f = 1.0 / @tan(fov_y * 0.5);
-    return .{
-        f / aspect, 0, 0,                            0,
-        0,          f, 0,                            0,
-        0,          0, -far / (far - near),          -1,
-        0,          0, -(far * near) / (far - near), 0,
-    };
-}
-
-// ── Vector math ──────────────────────────────────────────────
-
-fn normalize3(v: [3]f32) [3]f32 {
-    const len = @sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (len == 0) return v;
-    return .{ v[0] / len, v[1] / len, v[2] / len };
-}
-
-fn cross3(a: [3]f32, b: [3]f32) [3]f32 {
-    return .{
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    };
-}
-
-fn dot3(a: [3]f32, b: [3]f32) f32 {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-// ── Global helpers ───────────────────────────────────────────
 
 var exts_copy_global: []const [*:0]const u8 = &.{};
 

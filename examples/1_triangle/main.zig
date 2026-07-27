@@ -3,20 +3,14 @@
 //! Uses hardcoded vertex shader (triangle_vert.spv) — no vertex buffers needed.
 
 const std = @import("std");
+const common = @import("common");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const vk = noapi.vk;
 const Io = std.Io;
-pub const tracy_impl = @import("tracy_impl");
-pub const tracy = @import("tracy");
-pub const tracy_options: tracy.Options = .{
-    .on_demand = false,
-    .no_broadcast = false,
-    .only_localhost = false,
-    .only_ipv4 = false,
-    .delayed_init = false,
-    .manual_lifetime = false,
-};
+pub const tracy_impl = common.tracy_impl;
+pub const tracy = common.tracy;
+pub const tracy_options = common.tracy_options;
 
 const start_width = 1000;
 const start_height = 1000;
@@ -26,49 +20,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    try sdl3.hints.set(.video_driver, "wayland");
-    try sdl3.hints.set(.render_driver, "vulkan");
-    try sdl3.init(.{ .video = true, .events = true });
-    defer sdl3.quit(.{ .video = true, .events = true });
-
-    const sdl_win = try sdl3.video.Window.init("Triangle", start_width, start_height, .{
-        .resizable = true,
-        .high_pixel_density = true,
-    });
-    try sdl_win.show();
-
-    // ── Vulkan loader via SDL3 ───────────────────────────
-    try sdl3.vulkan.loadLibrary(null);
-    const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
-
-    const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
-    const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
-    exts_copy_global = exts_copy;
-
-    // ── GPU init ───────────────────────────────────────────
-    var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = frames_in_flight,
-        .app_name = "1_triangle",
-        .validation = true,
-        .loader = .{
-            .get_instance_proc_addr = @ptrCast(get_proc_addr),
-            .get_instance_extensions = &getExts,
-        },
-        .io = io,
-        .allocator = gpa,
-    });
-    defer gpu.deinit();
-
-    // ── Surface ────────────────────────────────────────────
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = start_width, .height = start_height } });
-    defer surf.deinit();
+    var app = try common.platformInit("1_triangle", start_width, start_height, frames_in_flight, io, gpa);
+    defer app.deinit();
+    try app.sdl_win.show();
+    const win_id = try app.sdl_win.getId();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/triangle_vert.spv", .vertex, "main", "triangle_vert");
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/triangle_vert.spv", .vertex, "main", "triangle_vert");
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/triangle_frag.spv", .fragment, "main", "triangle_frag");
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &app.gpu, "shaders/triangle_frag.spv", .fragment, "main", "triangle_frag");
     defer frag_shader.destroy();
 
     // ── Timing ─────────────────────────────────────────────
@@ -82,7 +42,6 @@ pub fn main(init: std.process.Init) !void {
     const fps_freq: u64 = sdl3.timer.getPerformanceFrequency();
 
     // ── Render loop ────────────────────────────────────────
-    const win_id = try sdl_win.getId();
     var should_close = false;
     while (!should_close) {
         // Event handling
@@ -96,14 +55,14 @@ pub fn main(init: std.process.Init) !void {
                     if (ke.key == .escape) should_close = true;
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (we.id == win_id) app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
                 },
                 else => {},
             }
         }
 
         // Skip if minimized
-        const flags = sdl_win.getFlags();
+        const flags = app.sdl_win.getFlags();
         if (flags.minimized) {
             sdl3.timer.delayMilliseconds(16);
             continue;
@@ -129,15 +88,15 @@ pub fn main(init: std.process.Init) !void {
         };
 
         // ── Render frame ────────────────────────────────────
-        _ = surf.beginFrame() catch |e| {
+        _ = app.surf.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
         };
 
-        const surface_size = surf.surfaceSize();
-        var cmd = surf.commandsBegin();
+        const surface_size = app.surf.surfaceSize();
+        var cmd = app.surf.commandsBegin();
 
-        const sc = surf.currentImage();
+        const sc = app.surf.currentImage();
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = clear_color },
         }, .render_area_size = .{ surface_size.width, surface_size.height } });
@@ -148,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
 
         cmd.endRendering();
 
-        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
 
         // ── FPS output ──────────────────────────────────────
         fps_frames += 1;
@@ -165,11 +124,5 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try gpu.waitIdle();
-}
-
-var exts_copy_global: []const [*:0]const u8 = &.{};
-
-fn getExts() []const [*:0]const u8 {
-    return exts_copy_global;
+    try app.gpu.waitIdle();
 }

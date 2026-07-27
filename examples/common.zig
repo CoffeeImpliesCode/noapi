@@ -59,7 +59,7 @@ pub fn platformInit(
     comptime app_name: [:0]const u8,
     width: u32,
     height: u32,
-    frames_in_flight: u32,
+    frames_in_flight: u5,
     io: Io,
     gpa: std.mem.Allocator,
 ) !App {
@@ -69,11 +69,14 @@ pub fn platformInit(
     try sdl3.init(.{ .video = true, .events = true });
     errdefer sdl3.quit(.{ .video = true, .events = true });
 
-    const sdl_win = try sdl3.video.Window.init(app_name, width, height, .{
+    var app: App = undefined;
+
+    app.sdl_win = try sdl3.video.Window.init(app_name, width, height, .{
         .resizable = true,
         .high_pixel_density = true,
     });
-    errdefer sdl_win.deinit();
+    errdefer app.sdl_win.deinit();
+    try app.sdl_win.show();
 
     // Vulkan loader via SDL3
     try sdl3.vulkan.loadLibrary(null);
@@ -82,8 +85,8 @@ pub fn platformInit(
     const exts_copy = try gpa.dupe([*:0]const u8, sdl_exts);
     exts_owned = exts_copy;
 
-    // GPU
-    var gpu = try noapi.Gpu.init(.{
+    // GPU — assign directly into app so &app.gpu is stable
+    app.gpu = try noapi.Gpu.init(.{
         .frames_in_flight = frames_in_flight,
         .app_name = app_name,
         .validation = true,
@@ -94,28 +97,25 @@ pub fn platformInit(
         .io = io,
         .allocator = gpa,
     });
-    errdefer gpu.deinit();
+    errdefer app.gpu.deinit();
 
-    // Surface
+    // Surface — use &app.gpu so the *Gpu pointer points to the struct field
     const sdl_surface = try sdl3.vulkan.Surface.init(
-        sdl_win,
-        @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
+        app.sdl_win,
+        @ptrFromInt(@intFromEnum(app.gpu.instanceHandle())),
         null,
     );
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    const surf = try noapi.Surface.init(&gpu, surface, .{
+    app.surf = try noapi.Surface.init(&app.gpu, surface, .{
         .extent = .{ .width = width, .height = height },
     });
 
-    return App{
-        .sdl_win = sdl_win,
-        .gpu = gpu,
-        .surf = surf,
-        .gpa = gpa,
-        .io = io,
-        .width = width,
-        .height = height,
-    };
+    app.gpa = gpa;
+    app.io = io;
+    app.width = width;
+    app.height = height;
+
+    return app;
 }
 
 // ── 3D Vector math ───────────────────────────────────────
