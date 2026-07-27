@@ -7,7 +7,6 @@ const common = @import("common");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const vk = noapi.vk;
-const Io = std.Io;
 pub const tracy_impl = common.tracy_impl;
 pub const tracy = common.tracy;
 pub const tracy_options = common.tracy_options;
@@ -40,14 +39,30 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.App.init(gpa, "Indirect Triangles", window_width, window_height, frames_in_flight, io);
+    var app = try common.App.init("Indirect Triangles", gpa, io, window_width, window_height, frames_in_flight, false);
     defer app.deinit();
     try app.sdl_win.show();
 
-    // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/indirect_tri_vert.spv", .vertex, "main", "indirect_tri_vert");
+    // ── Shaders ────────────────────────────────
+    const vert_shader = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/indirect_tri_vert.spv",
+        .vertex,
+        "main",
+        "indirect_tri_vert",
+    );
     defer vert_shader.destroy();
-    const frag_shader = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/indirect_tri_frag.spv", .fragment, "main", "indirect_tri_frag");
+    const frag_shader = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/indirect_tri_frag.spv",
+        .fragment,
+        "main",
+        "indirect_tri_frag",
+    );
     defer frag_shader.destroy();
 
     // ── Vertex buffer (single triangle shared by all draws) ─
@@ -64,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
     const vert_data_ptr: *VertexData = @ptrCast(@alignCast(vert_data_buf.cpu));
     vert_data_ptr.* = .{ .verts = vert_buf.gpu };
 
-    // ── Index buffer ───────────────────────────────────────
+    // ── Index buffer ──────────────────────────────
     const idx_buf = try app.gpu.gpuMalloc(@sizeOf(u32) * 3, 4, .default);
     defer app.gpu.gpuFree(idx_buf);
     const indices: [*]u32 = @ptrCast(@alignCast(idx_buf.cpu));
@@ -84,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
 
     const circle_radius: f32 = 0.6;
     for (0..num_triangles) |i| {
-        const angle = @as(f32, @floatFromInt(i)) / @as(f32, num_triangles) * std.math.pi * 2.0;
+        const angle: f32 = @floatCast(@as(f64, @floatFromInt(i)) / @as(f64, num_triangles) * std.math.pi * 2.0);
         const x = @cos(angle) * circle_radius;
         const y = @sin(angle) * circle_radius;
 
@@ -118,13 +133,9 @@ pub fn main(init: std.process.Init) !void {
     const frame_sem = try app.gpu.semaphoreCreate(0);
     defer app.gpu.semaphoreDestroy(frame_sem);
 
-    // ── Main loop ──────────────────────────────────────────
-    // ── FPS counter ─────────────────────────────────────────
-    var fps_timer: u64 = sdl3.timer.getPerformanceCounter();
-    var fps_frames: u32 = 0;
-    const fps_freq: u64 = sdl3.timer.getPerformanceFrequency();
+    // ── Main loop ───────────────────────────────
     var next_frame: u64 = 1;
-    var time_sec: f32 = 0;
+    var timer = common.FrameTimer.init();
     var should_close = false;
 
     while (!should_close) {
@@ -158,13 +169,15 @@ pub fn main(init: std.process.Init) !void {
         };
         _ = schedule;
 
-        time_sec += 1.0 / 60.0;
+        timer.tick();
         const surface_size = app.surf.surfaceSize();
 
         // Animate: rotate triangles around the circle
-        const rotation = time_sec * 0.5;
+        const rotation = timer.elapsed * 0.5;
         for (0..num_triangles) |i| {
-            const angle = @as(f32, @floatFromInt(i)) / @as(f32, num_triangles) * std.math.pi * 2.0 + rotation;
+            const angle: f32 = @floatCast(
+                @as(f64, @floatFromInt(i)) / @as(f64, num_triangles) * std.math.pi * 2.0 + @as(f64, rotation),
+            );
             const x = @cos(angle) * circle_radius;
             const y = @sin(angle) * circle_radius;
             indirect_draws[i].data.pos = .{ x, y, 0.0 };
@@ -176,9 +189,9 @@ pub fn main(init: std.process.Init) !void {
 
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{
-                0.1 + @sin(time_sec * 0.5) * 0.05,
-                0.1 + @cos(time_sec * 0.7) * 0.05,
-                0.2 + @sin(time_sec * 0.3) * 0.05,
+                0.1 + @sin(timer.elapsed * 0.5) * 0.05,
+                0.1 + @cos(timer.elapsed * 0.7) * 0.05,
+                0.2 + @sin(timer.elapsed * 0.3) * 0.05,
                 1.0,
             } },
         }, .render_area_size = .{ surface_size.width, surface_size.height } });
@@ -200,7 +213,16 @@ pub fn main(init: std.process.Init) !void {
 
         // Draw 32 triangles using indirect multi-draw
         // stride = @sizeOf(IndirectDraw) so the GPU skips per-draw data between commands
-        cmd.drawIndexedIndirectMulti(push, idx_buf, indirect_buf, @sizeOf(IndirectDraw), draw_count_buf, 0, num_triangles);
+        cmd.drawIndexedIndirectMulti(
+            push,
+            idx_buf,
+            .u32,
+            indirect_buf,
+            @sizeOf(IndirectDraw),
+            draw_count_buf,
+            0,
+            num_triangles,
+        );
 
         cmd.endRendering();
 
@@ -209,17 +231,7 @@ pub fn main(init: std.process.Init) !void {
         _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
         next_frame += 1;
 
-        // ── FPS output ──────────────────────────────────────
-        fps_frames += 1;
-        if (fps_frames == 60) {
-            const now = sdl3.timer.getPerformanceCounter();
-            const elapsed_ns = now - fps_timer;
-            const fps = @as(f64, @floatFromInt(fps_freq * fps_frames)) / @as(f64, @floatFromInt(elapsed_ns));
-            const ms = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(fps_freq * fps_frames)) * 1000.0;
-            std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
-            fps_timer = now;
-            fps_frames = 0;
-        }
+        timer.report();
     }
 
     try app.gpu.waitIdle();

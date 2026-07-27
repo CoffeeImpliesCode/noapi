@@ -28,4 +28,6 @@ test "GpuPtr offset" {
     try std.testing.expect(off.gpu == 0x2010);
 }
 
-test "GpuPtr size" { try std.testing.expect(@sizeOf(GpuPtr) == 24); }
+test "GpuPtr size" {
+    try std.testing.expect(@sizeOf(GpuPtr) == 24);
+}

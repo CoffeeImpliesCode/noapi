@@ -36,6 +36,326 @@ const Filter = Texture.Filter;
 const FrameSchedule = @import("Gpu.zig").FrameSchedule;
 const FrameResult = @import("Gpu.zig").FrameResult;
 const PresentInfo = @import("Gpu.zig").PresentInfo;
+const PresentFeedback = @import("Gpu.zig").PresentFeedback;
+const TimestampQuerySet = @import("TimestampQuerySet.zig");
+const TimestampInfo = TimestampQuerySet.TimestampInfo;
+
+const PresentTimingMode = enum {
+    unsupported,
+    ext,
+    google,
+};
+
+const PresentTimingCallResult = enum {
+    not_called,
+    success,
+    suboptimal,
+    incomplete,
+    failed,
+};
+
+const PresentQueueResult = enum {
+    not_called,
+    success,
+    suboptimal,
+    out_of_date,
+    surface_lost,
+    timing_queue_full,
+    device_lost,
+    failed,
+};
+
+const PresentTimingDiagnostics = struct {
+    mode: PresentTimingMode = .unsupported,
+    swapchain_id: u64 = 0,
+    swapchain_generation: u64 = 0,
+    present_stage_bits: u32 = 0,
+    time_domain_id: u64 = 0,
+    time_domain_valid: bool = false,
+    last_present_id: u64 = 0,
+    last_present_stage_bits: u32 = 0,
+    last_present_time_domain_id: u64 = 0,
+    last_present_queue_result: PresentQueueResult = .not_called,
+    last_present_chain_id2: bool = false,
+    last_present_chain_timings: bool = false,
+    last_present_chain_google: bool = false,
+    timed_present_attempts: u64 = 0,
+    timed_present_submitted: u64 = 0,
+    outstanding_timed_presents: u32 = 0,
+    ext_probe_calls: u64 = 0,
+    ext_probe_result: PresentTimingCallResult = .not_called,
+    ext_probe_count: u32 = 0,
+    ext_empty_probe_polls: u32 = 0,
+    ext_probe_timing_properties_counter: u64 = 0,
+    ext_probe_time_domains_counter: u64 = 0,
+    ext_retrieve_calls: u64 = 0,
+    ext_retrieve_result: PresentTimingCallResult = .not_called,
+    ext_retrieve_count: u32 = 0,
+    ext_retrieve_timing_properties_counter: u64 = 0,
+    ext_retrieve_time_domains_counter: u64 = 0,
+    ext_last_record_id: u64 = 0,
+    ext_last_record_stage_count: u32 = 0,
+    ext_last_record_stage_bits: u32 = 0,
+    ext_last_record_time: u64 = 0,
+    ext_last_record_complete: bool = false,
+    ext_complete_records: u32 = 0,
+    ext_positive_records: u32 = 0,
+    google_probe_calls: u64 = 0,
+    google_probe_result: PresentTimingCallResult = .not_called,
+    google_probe_count: u32 = 0,
+    google_empty_probe_polls: u32 = 0,
+    google_retrieve_calls: u64 = 0,
+    google_retrieve_result: PresentTimingCallResult = .not_called,
+    google_retrieve_count: u32 = 0,
+    google_last_record_id: u64 = 0,
+    google_last_record_time: u64 = 0,
+    google_complete_records: u32 = 0,
+    google_positive_records: u32 = 0,
+    last_poll_returned: u32 = 0,
+    first_timed_present_start_ns: i96 = 0,
+    watchdog_last_now_ns: i96 = 0,
+    watchdog_elapsed_ns: i96 = 0,
+    watchdog_triggered: bool = false,
+
+    fn notePresentRequest(
+        self: *PresentTimingDiagnostics,
+        mode: PresentTimingMode,
+        present_id: u64,
+        stage_bits: u32,
+        time_domain_id: u64,
+    ) void {
+        self.mode = mode;
+        self.last_present_id = present_id;
+        self.last_present_stage_bits = stage_bits;
+        self.last_present_time_domain_id = time_domain_id;
+        self.last_present_queue_result = .not_called;
+        self.last_present_chain_id2 = mode == .ext;
+        self.last_present_chain_timings = mode == .ext;
+        self.last_present_chain_google = mode == .google;
+        self.timed_present_attempts += 1;
+    }
+
+    fn notePresentResult(self: *PresentTimingDiagnostics, result: PresentQueueResult) void {
+        self.last_present_queue_result = result;
+        if (result == .success or result == .suboptimal) {
+            self.timed_present_submitted += 1;
+        }
+    }
+
+    fn notePresentFailure(self: *PresentTimingDiagnostics, result: PresentQueueResult) void {
+        self.last_present_queue_result = result;
+    }
+
+    fn noteExtProbe(
+        self: *PresentTimingDiagnostics,
+        result: PresentTimingCallResult,
+        count: u32,
+        timing_properties_counter: u64,
+        time_domains_counter: u64,
+    ) void {
+        self.ext_probe_calls += 1;
+        self.ext_probe_result = result;
+        self.ext_probe_count = count;
+        self.ext_probe_timing_properties_counter = timing_properties_counter;
+        self.ext_probe_time_domains_counter = time_domains_counter;
+    }
+
+    fn noteExtRetrieve(
+        self: *PresentTimingDiagnostics,
+        result: PresentTimingCallResult,
+        count: u32,
+        timing_properties_counter: u64,
+        time_domains_counter: u64,
+    ) void {
+        self.ext_retrieve_calls += 1;
+        self.ext_retrieve_result = result;
+        self.ext_retrieve_count = count;
+        self.ext_retrieve_timing_properties_counter = timing_properties_counter;
+        self.ext_retrieve_time_domains_counter = time_domains_counter;
+    }
+
+    fn noteExtRecord(
+        self: *PresentTimingDiagnostics,
+        present_id: u64,
+        stage_count: u32,
+        stage: vk.PresentStageFlagsEXT,
+        time: u64,
+        complete: bool,
+    ) void {
+        self.ext_last_record_id = present_id;
+        self.ext_last_record_stage_count = stage_count;
+        self.ext_last_record_stage_bits = @bitCast(stage);
+        self.ext_last_record_time = time;
+        self.ext_last_record_complete = complete;
+        if (complete) {
+            self.ext_complete_records +|= 1;
+            if (time != 0) self.ext_positive_records +|= 1;
+        }
+    }
+
+    fn noteGoogleProbe(
+        self: *PresentTimingDiagnostics,
+        result: PresentTimingCallResult,
+        count: u32,
+    ) void {
+        self.google_probe_calls += 1;
+        self.google_probe_result = result;
+        self.google_probe_count = count;
+    }
+
+    fn noteGoogleRetrieve(
+        self: *PresentTimingDiagnostics,
+        result: PresentTimingCallResult,
+        count: u32,
+    ) void {
+        self.google_retrieve_calls += 1;
+        self.google_retrieve_result = result;
+        self.google_retrieve_count = count;
+    }
+
+    fn noteGoogleRecord(self: *PresentTimingDiagnostics, present_id: u64, time: u64) void {
+        self.google_last_record_id = present_id;
+        self.google_last_record_time = time;
+        self.google_complete_records +|= 1;
+        if (time != 0) self.google_positive_records +|= 1;
+    }
+
+    fn notePollResult(self: *PresentTimingDiagnostics, count: usize) void {
+        self.last_poll_returned = @intCast(count);
+    }
+};
+fn presentTimingCallResult(result: vk.Result) PresentTimingCallResult {
+    return switch (result) {
+        .success => .success,
+        .suboptimal_khr => .suboptimal,
+        .incomplete => .incomplete,
+        else => .failed,
+    };
+}
+fn presentQueueResult(result: vk.Result) PresentQueueResult {
+    return switch (result) {
+        .success => .success,
+        .suboptimal_khr => .suboptimal,
+        else => .failed,
+    };
+}
+
+fn presentQueueFailure(err: anyerror) PresentQueueResult {
+    return if (err == error.OutOfDateKHR)
+        .out_of_date
+    else if (err == error.SurfaceLostKHR)
+        .surface_lost
+    else if (err == error.PresentTimingQueueFullEXT)
+        .timing_queue_full
+    else if (err == error.DeviceLost)
+        .device_lost
+    else
+        .failed;
+}
+
+fn frameResultForPresentQueue(result: PresentQueueResult) FrameResult {
+    return .{
+        .gpu_blocked_ns = 0,
+        .present_out_of_date = result == .out_of_date,
+    };
+}
+
+const PresentRecord = struct {
+    present_id: u64,
+    actual_present_ns: u64,
+    completed: bool,
+};
+
+// One bounded queue is owned per surface for both timing backends.
+const max_present_feedback = 64;
+// Vulkan timing feedback must become available within the same bounded drain
+// window used by the presentation lifecycle. Keep polling nonblocking, then
+// report an explicit capability failure instead of substituting CPU time.
+const present_timing_deadline_ns: i96 = 5_000_000_000;
+
+const PresentTimingWatchdogDecision = enum {
+    wait,
+    disable,
+};
+
+fn presentTimingWatchdogDecision(
+    outstanding: u32,
+    first_pending_start_ns: ?i96,
+    now_ns: i96,
+) PresentTimingWatchdogDecision {
+    const start_ns = first_pending_start_ns orelse return .wait;
+    if (outstanding == 0 or now_ns < start_ns) return .wait;
+    return if (now_ns - start_ns >= present_timing_deadline_ns) .disable else .wait;
+}
+fn presentTimingWatchdogProgressStart(
+    outstanding: u32,
+    current_start_ns: ?i96,
+    now_ns: i96,
+    completed: usize,
+) ?i96 {
+    if (completed == 0) return current_start_ns;
+    return if (outstanding == 0) null else now_ns;
+}
+
+fn notePresentTimingProgress(self: *VkBackend, win: *Window, completed: usize) void {
+    if (completed == 0) {
+        if (win.outstanding_timed_presents == 0) {
+            win.first_timed_present_start_ns = null;
+            win.present_timing_diagnostics.first_timed_present_start_ns = 0;
+        }
+        return;
+    }
+    const now_ns = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+    const current_start_ns = if (win.first_timed_present_start_ns) |start|
+        start.nanoseconds
+    else
+        null;
+    const next_start_ns = presentTimingWatchdogProgressStart(
+        win.outstanding_timed_presents,
+        current_start_ns,
+        now_ns,
+        completed,
+    );
+    if (next_start_ns) |start_ns| {
+        win.first_timed_present_start_ns = std.Io.Timestamp.fromNanoseconds(start_ns);
+        win.present_timing_diagnostics.first_timed_present_start_ns = start_ns;
+    } else {
+        win.first_timed_present_start_ns = null;
+        win.present_timing_diagnostics.first_timed_present_start_ns = 0;
+    }
+}
+
+const PresentationScratch = struct {
+    records: [max_present_feedback]PresentRecord = undefined,
+    normalized: [max_present_feedback]PresentFeedback = undefined,
+    ext_records: [max_present_feedback]vk.PastPresentationTimingEXT = undefined,
+    ext_stages: [max_present_feedback]vk.PresentStageTimeEXT = undefined,
+    google_records: [max_present_feedback]vk.PastPresentationTimingGOOGLE = undefined,
+};
+
+const PastPresentationTimingPropertiesProbe = extern struct {
+    s_type: vk.StructureType = .past_presentation_timing_properties_ext,
+    p_next: ?*anyopaque = null,
+    timing_properties_counter: u64 = 0,
+    time_domains_counter: u64 = 0,
+    presentation_timing_count: u32 = 0,
+    p_presentation_timings: ?[*]vk.PastPresentationTimingEXT = null,
+};
+
+const TimestampQueryEntry = struct {
+    valid: bool = false,
+    pool: vk.QueryPool = .null_handle,
+    count: u32 = 0,
+};
+
+const SurfacePresentTimingSupport = struct {
+    present_id2: bool = false,
+    present_timing: bool = false,
+    supported_stages: vk.PresentStageFlagsEXT = .{},
+    stage: ?vk.PresentStageFlagsEXT = null,
+    time_domain_id: u64 = 0,
+    time_domain_valid: bool = false,
+};
 
 pub const VkBackend = @This();
 
@@ -44,16 +364,49 @@ pub const VkBackend = @This();
 // (~10x faster, requires extension + driver support).
 const use_swapchain_maintenance1 = false;
 
-// Opaque handle types that the backend uses for resources
+// Tracy GPU zones: u16 wire query ids. mr_gpu encodes the frame in the high byte
+// so ids are unique across frames. The server resolves GpuTime events through a
+// per-id slot array (ctx->query[id]); ids restarting every frame would collide
+// across windows. 256 slots per frame (index: u8).
+const TracyQueryId = packed struct(u16) {
+    pub const cap: u16 = 256; // slots 0..255 per frame
+    frame: u8,
+    index: u8,
+};
+
+// Calibrated timestamp domains: CPU (CLOCK_MONOTONIC_RAW, matches TracyVulkan.hpp
+// on Linux) + GPU device domain (the clock vkCmdWriteTimestamp queries use).
+const tracy_calib_info = [2]vk.CalibratedTimestampInfoKHR{
+    .{ .time_domain = .clock_monotonic_raw_khr },
+    .{ .time_domain = .device_khr },
+};
+
+// Opaque handle types that the backend uses for resources.
 pub const CommandBufferHandle = vk.CommandBuffer;
+pub const TimestampQueryHandle = enum(u32) {
+    invalid = 0,
+    _,
+};
 pub const ShaderHandle = vk.ShaderEXT;
 pub const SemaphoreHandle = vk.Semaphore;
 pub const BufferHandle = vk.Buffer;
 pub const QueueHandle = vk.Queue;
 pub const TextureHandle = @import("TextureHandle.zig");
 
+pub const DeviceIdentity = struct {
+    name: []const u8,
+    vendor_id: u32,
+    device_id: u32,
+    driver: []const u8,
+};
+
 pub const max_textures = 65536;
 pub const max_samplers = 256;
+
+fn propertyString(bytes: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
+    return bytes[0..end];
+}
 
 allocator: Allocator = undefined,
 b: vk.BaseWrapper = undefined,
@@ -67,11 +420,15 @@ queue: vk.QueueProxy = undefined,
 queue_family_index: u32 = undefined,
 queue_sem: vk.Semaphore = undefined,
 offscreen_cmd_pool: vk.CommandPool = .null_handle,
-free_cmd_bufs: std.ArrayList(vk.CommandBuffer) = undefined,
 submitted_work: std.ArrayList(SubmittedWork) = undefined,
+timestamp_query_sets: std.ArrayListUnmanaged(TimestampQueryEntry) = .empty,
 queue_counter: u64 = 0,
 queue_mutex: std.Io.Mutex = std.Io.Mutex.init,
 io: std.Io,
+// Device-level timing extension availability; the active mode is per surface.
+has_ext_present_timing: bool = false,
+has_google_present_timing: bool = false,
+has_surface_capabilities2: bool = false,
 
 // Shared descriptor set layouts (no_gfx_api pattern: 3 base sets + optional raytracing)
 desc_layouts: [3]vk.DescriptorSetLayout = undefined,
@@ -94,6 +451,12 @@ texture_view_cache: std.AutoHashMap(u64, vk.ImageView) = undefined,
 sampler_cache: std.AutoHashMap(u64, vk.Sampler) = undefined,
 // Device limits queried at init from VkPhysicalDeviceProperties
 device_limits: DeviceLimits = .{},
+selected_device_name: [vk.MAX_PHYSICAL_DEVICE_NAME_SIZE]u8 = undefined,
+selected_device_name_len: u32 = 0,
+selected_driver_name: [vk.MAX_DRIVER_NAME_SIZE]u8 = undefined,
+selected_driver_name_len: u32 = 0,
+selected_vendor_id: u32 = 0,
+selected_device_id: u32 = 0,
 // Memory properties cached at init from vkGetPhysicalDeviceMemoryProperties
 mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
 
@@ -105,13 +468,22 @@ last_depth_image: vk.Image = .null_handle,
 last_depth_format: vk.Format = .undefined,
 
 // Debug feature flags (set at creation via Options)
-enable_debug_utils: bool = false,       // VK_EXT_debug_utils object naming + labels
-enable_nv_checkpoints: bool = false,    // VK_NV_device_diagnostic_checkpoints
-enable_nv_diagnostics: bool = false,    // VK_NV_device_diagnostics_config
-enable_device_fault: bool = false,      // VK_EXT_device_fault
+enable_debug_utils: bool = false, // VK_EXT_debug_utils object naming + labels
+enable_nv_checkpoints: bool = false, // VK_NV_device_diagnostic_checkpoints
+enable_nv_diagnostics: bool = false, // VK_NV_device_diagnostics_config
+enable_device_fault: bool = false, // VK_EXT_device_fault
 
 // NVIDIA diagnostic checkpoint counter (monotonic)
 checkpoint_counter: u32 = 0,
+
+// Generic timestamp queries are independent of Tracy. Tracy zones use a
+// separate flag because they also require calibrated timestamp support.
+timestamp_queries: bool = false,
+timestamp_period: f32 = 0,
+timestamp_valid_bits: u7 = 0,
+tracy_gpu_zones: bool = false,
+tracy_queue: ?tracy.GpuQueue = null,
+tracy_prev_calib_cpu: u64 = 0,
 
 const TextureInfo = struct {
     valid: bool = true,
@@ -138,6 +510,7 @@ pub const Window = struct {
     swapchain_format: vk.Format = .b8g8r8a8_srgb,
     extent: Extent2D = .{}, // actual swapchain image extent
     requested_extent: Extent2D = .{}, // pending resize request
+    present_mode: vk.PresentModeKHR = .fifo_khr,
     images: std.ArrayListUnmanaged(vk.Image) = .empty,
     views: std.ArrayListUnmanaged(vk.ImageView) = .empty,
     present_sems: std.ArrayListUnmanaged(vk.Semaphore) = .empty,
@@ -145,35 +518,71 @@ pub const Window = struct {
     cmd_pools: std.ArrayListUnmanaged(vk.CommandPool) = .empty,
     cmd_buffers: std.ArrayListUnmanaged(vk.CommandBufferProxy) = .empty,
     cmd_pool_ready: std.ArrayListUnmanaged(vk.Fence) = .empty,
+    // Per-frame Tracy GPU query pools (timestamp queries); stay empty unless profiling enabled.
+    tracy_query_pools: std.ArrayListUnmanaged(vk.QueryPool) = .empty,
+    tracy_queries: std.ArrayListUnmanaged(u16) = .empty,
+    // Cached Tracy source-location ids for per-frame GPU zones, keyed by swapchain
+    // image index (bounded: alloc'd srclocs are never freed by the profiler).
+    tracy_img_srclocs: std.ArrayListUnmanaged(u64) = .empty,
     present_done_fences: std.ArrayListUnmanaged(vk.Fence) = if (use_swapchain_maintenance1) .empty else undefined,
     frame_index: u32 = 0,
     image_index: u32 = 0,
+    // CPU nanoseconds spent blocked on the GPU this frame (acquire/present/fence waits).
+    slop_ns: u64 = 0,
     needs_resize: bool = false,
     resize_throttle: u32 = 0,
     retired_swapchain: vk.SwapchainKHR = .null_handle,
-    // Per-frame pending wait/signal semaphores (submitted with cmd buf in endFrame)
+    // Per-frame pending wait/signal semaphores (submitted with cmd buf in endFrame).
     wait_sems: std.ArrayListUnmanaged(std.ArrayListUnmanaged(vk.Semaphore)) = .empty,
     wait_values: std.ArrayListUnmanaged(std.ArrayListUnmanaged(u64)) = .empty,
     signal_sems: std.ArrayListUnmanaged(std.ArrayListUnmanaged(vk.Semaphore)) = .empty,
     signal_values: std.ArrayListUnmanaged(std.ArrayListUnmanaged(u64)) = .empty,
+    last_present_timing_id: u64 = 0,
+    last_feedback_id: u64 = 0,
+    // Resolved per surface at addWindow from present timing capabilities.
+    timing_mode: PresentTimingMode = .unsupported,
+    present_stage_queries: vk.PresentStageFlagsEXT = .{},
+    present_stage_support: vk.PresentStageFlagsEXT = .{},
+    present_time_domains: [8]vk.TimeDomainKHR = undefined,
+    present_time_domain_ids: [8]u64 = undefined,
+    present_time_domain_count: u32 = 0,
+    time_domain_id: u64 = 0,
+    time_domain_valid: bool = false,
+    outstanding_timed_presents: u32 = 0,
+    first_timed_present_start_ns: ?std.Io.Timestamp = null,
+    present_timing_diagnostics: PresentTimingDiagnostics = .{},
+    present_scratch: PresentationScratch = .{},
 };
+
+fn notePresentQueueFailure(win: *Window, err: anyerror) FrameResult {
+    const result = frameResultForPresentQueue(presentQueueFailure(err));
+    if (result.present_out_of_date) win.needs_resize = true;
+    return result;
+}
+
+fn advanceFrame(win: *Window, frame: u32) void {
+    if (win.resize_throttle > 0) win.resize_throttle -= 1;
+    win.frame_index = (frame + 1) % win.frames_in_flight;
+}
 
 const SubmittedWork = struct {
     cmds: []const vk.CommandBuffer,
     fence: vk.Fence,
 };
 
-    pub const Options = struct {
-        app_name: [:0]const u8 = "noapi",
-        validation: bool = false,
-        frames_in_flight: u32 = 2,
-        loader: Loader = .{},
-        io: std.Io,
-        allocator: std.mem.Allocator = std.heap.page_allocator,
-        enable_debug_utils: bool = false,
-        enable_nv_checkpoints: bool = false,
-        enable_nv_diagnostics: bool = false,
-        enable_device_fault: bool = false,
+pub const Options = struct {
+    app_name: [:0]const u8 = "noapi",
+
+    validation: bool = false,
+    frames_in_flight: u32 = 2,
+    loader: Loader = .{},
+    io: std.Io,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    enable_debug_utils: bool = false,
+    enable_nv_checkpoints: bool = false,
+    enable_nv_diagnostics: bool = false,
+    enable_device_fault: bool = false,
+    timestamp_queries: bool = false,
 
     pub const Loader = struct {
         get_instance_proc_addr: ?vk.PfnGetInstanceProcAddr = null,
@@ -181,9 +590,113 @@ const SubmittedWork = struct {
     };
 };
 
+fn timestampQueriesAvailable(period: f32, valid_bits: u7) bool {
+    return period > 0 and valid_bits > 0;
+}
+fn extPresentTimingExtensionsAvailable(
+    has_ext_present_timing: bool,
+    has_present_id2: bool,
+    has_surface_capabilities2: bool,
+    has_calibrated_timestamps: bool,
+) bool {
+    return has_ext_present_timing and has_present_id2 and
+        has_surface_capabilities2 and has_calibrated_timestamps;
+}
+
+fn needsCalibratedTimestamps(ext_present_timing: bool, tracy_gpu_zones: bool) bool {
+    return ext_present_timing or tracy_gpu_zones;
+}
+
+fn selectPresentStage(supported: vk.PresentStageFlagsEXT) ?vk.PresentStageFlagsEXT {
+    if (supported.image_first_pixel_visible_bit_ext) {
+        return .{ .image_first_pixel_visible_bit_ext = true };
+    }
+    if (supported.image_first_pixel_out_bit_ext) {
+        return .{ .image_first_pixel_out_bit_ext = true };
+    }
+    return null;
+}
+
+/// Resolve the final mode after surface capabilities and swapchain time-domain
+/// properties are known. EXT is usable only when every prerequisite is present.
+fn resolvePresentTimingMode(
+    ext_device_support: bool,
+    surface_support: SurfacePresentTimingSupport,
+    google_device_support: bool,
+) PresentTimingMode {
+    if (ext_device_support and
+        surface_support.present_id2 and
+        surface_support.present_timing and
+        surface_support.stage != null and
+        surface_support.time_domain_valid)
+    {
+        return .ext;
+    }
+    if (google_device_support) return .google;
+    return .unsupported;
+}
+
+/// Resolve the provisional mode used while creating a swapchain. The time
+/// domain is queried immediately after creation and can downgrade EXT.
+fn resolveSurfacePresentTimingMode(
+    ext_device_support: bool,
+    surface_support: SurfacePresentTimingSupport,
+    google_device_support: bool,
+) PresentTimingMode {
+    if (ext_device_support and
+        surface_support.present_id2 and
+        surface_support.present_timing and
+        surface_support.stage != null)
+    {
+        return .ext;
+    }
+    if (google_device_support) return .google;
+    return .unsupported;
+}
+
+fn querySurfacePresentTimingSupport(
+    self: *VkBackend,
+    surface: vk.SurfaceKHR,
+) SurfacePresentTimingSupport {
+    var support: SurfacePresentTimingSupport = .{};
+    if (!self.has_surface_capabilities2 or !self.has_ext_present_timing) return support;
+
+    var present_id2_caps: vk.SurfaceCapabilitiesPresentId2KHR = .{
+        .present_id_2_supported = .false,
+    };
+    var timing_caps: vk.PresentTimingSurfaceCapabilitiesEXT = .{
+        .p_next = @ptrCast(&present_id2_caps),
+        .present_timing_supported = .false,
+        .present_at_absolute_time_supported = .false,
+        .present_at_relative_time_supported = .false,
+        .present_stage_queries = .{},
+    };
+    var caps2: vk.SurfaceCapabilities2KHR = .{
+        .p_next = @ptrCast(&timing_caps),
+        .surface_capabilities = undefined,
+    };
+    const surface_info: vk.PhysicalDeviceSurfaceInfo2KHR = .{ .surface = surface };
+    self.instance.getPhysicalDeviceSurfaceCapabilities2KHR(
+        self.physical_device,
+        &surface_info,
+        &caps2,
+    ) catch |err| {
+        log.warn("present timing capability query failed: {}", .{err});
+        return support;
+    };
+    support.present_id2 = present_id2_caps.present_id_2_supported == .true;
+    support.present_timing = timing_caps.present_timing_supported == .true;
+    if (support.present_timing) {
+        support.supported_stages = timing_caps.present_stage_queries;
+        support.stage = selectPresentStage(timing_caps.present_stage_queries);
+    }
+    return support;
+}
+
 const DeviceFeatures = struct {
     vk10: vk.PhysicalDeviceFeatures2 = .{ .features = .{
         .shader_int_64 = .true,
+        .shader_float_64 = .true,
         .sampler_anisotropy = .true,
     } },
     vk11: vk.PhysicalDeviceVulkan11Features = .{ .shader_draw_parameters = .true },
@@ -192,12 +705,18 @@ const DeviceFeatures = struct {
     shader_object: vk.PhysicalDeviceShaderObjectFeaturesEXT = .{},
     descriptor_buffer: vk.PhysicalDeviceDescriptorBufferFeaturesEXT = .{},
     swapchain_maint1: vk.PhysicalDeviceSwapchainMaintenance1FeaturesEXT = .{},
+    present_id2: vk.PhysicalDevicePresentId2FeaturesKHR = .{},
+    present_timing: vk.PhysicalDevicePresentTimingFeaturesEXT = .{},
     diagnostics_config: void = undefined,
     device_fault: void = undefined,
 
-    fn init(self: *DeviceFeatures) void {
+    fn init(
+        self: *DeviceFeatures,
+        tracy_host_reset: bool,
+        present_timing: bool,
+    ) void {
         self.vk10.features.shader_int_64 = .true;
-        self.vk10.features.sampler_anisotropy = .true;
+        self.vk10.features.shader_float_64 = .true;
         self.vk11.shader_draw_parameters = .true;
         self.vk11.p_next = @constCast(&self.vk12);
         self.vk10.p_next = @constCast(&self.vk11);
@@ -215,6 +734,7 @@ const DeviceFeatures = struct {
             .buffer_device_address = .true,
             .scalar_block_layout = .true,
             .draw_indirect_count = .true,
+            .host_query_reset = if (tracy_host_reset) .true else .false,
             .p_next = @constCast(&self.descriptor_buffer),
         };
         self.descriptor_buffer = .{ .descriptor_buffer = .true, .p_next = @constCast(&self.shader_object) };
@@ -227,6 +747,17 @@ const DeviceFeatures = struct {
         if (use_swapchain_maintenance1) {
             self.swapchain_maint1 = .{ .swapchain_maintenance_1 = .true, .p_next = @constCast(&self.vk13) };
             self.shader_object.p_next = @constCast(&self.swapchain_maint1);
+        }
+        if (present_timing) {
+            self.present_id2 = .{
+                .present_id_2 = .true,
+                .p_next = @constCast(&self.present_timing),
+            };
+            self.present_timing = .{
+                .present_timing = .true,
+                .p_next = self.shader_object.p_next,
+            };
+            self.shader_object.p_next = @constCast(&self.present_id2);
         }
     }
 };
@@ -270,30 +801,49 @@ const required_device_extensions = [_][*:0]const u8{
 // are appended at runtime by init() based on options. See init() for the
 // dev_exts ArrayList that replaces this constant at device creation time.
 
+fn hasExtension(extensions: []const vk.ExtensionProperties, wanted: []const u8) bool {
+    for (extensions) |extension| {
+        const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&extension.extension_name)), 0);
+        if (std.mem.eql(u8, name, wanted)) return true;
+    }
+    return false;
+}
+
 // Push constant layouts (matches no_gfx_api Graphics_Shader_Push_Constants)
 const GraphicsPushConstants = extern struct {
     vert_data: u64,
     frag_data: u64,
     indirect_data: u64,
+    screen: [2]f32, // framebuffer size (px); @sizeOf must match PushData
+    scene_bda: u64, // the drawable bag (V1b); @sizeOf must match PushData
+    perm_bda: u64, // the sorted permutation (V1b); @sizeOf must match PushData
 };
 const ComputePushConstants = extern struct {
     compute_data: u64,
 };
 
-pub fn init(options: Options) !VkBackend {
+pub fn init(options: Options) !*VkBackend {
+    const t_start = std.Io.Timestamp.now(options.io, .real);
     const alloc = options.allocator;
-    var self: VkBackend = .{ .allocator = alloc, .io = options.io };
+    const enable_tracy_gpu = tracy.enabled and options.timestamp_queries;
+    const self = try alloc.create(VkBackend);
+    errdefer alloc.destroy(self);
+    self.* = .{ .allocator = alloc, .io = options.io };
     self.frames_in_flight = options.frames_in_flight;
     self.enable_debug_utils = options.enable_debug_utils;
     self.enable_nv_checkpoints = options.enable_nv_checkpoints;
     self.enable_nv_diagnostics = options.enable_nv_diagnostics;
     self.enable_device_fault = options.enable_device_fault;
+    self.timestamp_queries = options.timestamp_queries;
+    self.tracy_gpu_zones = enable_tracy_gpu;
     self.texture_view_cache = std.AutoHashMap(u64, vk.ImageView).init(alloc);
     self.sampler_cache = std.AutoHashMap(u64, vk.Sampler).init(alloc);
 
     const get_proc_addr = options.loader.get_instance_proc_addr orelse return error.BackendError;
     self.b = vk.BaseWrapper.load(get_proc_addr);
     log.info("Base wrapper loaded", .{});
+
+    const t0 = std.Io.Timestamp.now(options.io, .real);
 
     const app_info: vk.ApplicationInfo = .{
         .p_application_name = if (options.app_name.len > 0) options.app_name else "noapi",
@@ -302,6 +852,9 @@ pub fn init(options: Options) !VkBackend {
         .engine_version = @bitCast(vk.makeApiVersion(0, 1, 0, 0)),
         .api_version = @bitCast(vk.makeApiVersion(0, 1, 4, 0)),
     };
+
+    const available_instance_exts = try self.b.enumerateInstanceExtensionPropertiesAlloc(null, alloc);
+    defer alloc.free(available_instance_exts);
 
     var enabled_extensions = std.ArrayList([*:0]const u8).empty;
     defer enabled_extensions.deinit(alloc);
@@ -314,9 +867,11 @@ pub fn init(options: Options) !VkBackend {
         try enabled_extensions.append(alloc, "VK_KHR_xlib_surface");
     }
     try enabled_extensions.append(alloc, "VK_KHR_surface");
+    if (hasExtension(available_instance_exts, "VK_KHR_get_surface_capabilities2")) {
+        try enabled_extensions.append(alloc, "VK_KHR_get_surface_capabilities2");
+    }
     if (options.validation or options.enable_debug_utils) try enabled_extensions.append(alloc, "VK_EXT_debug_utils");
     if (use_swapchain_maintenance1) {
-        try enabled_extensions.append(alloc, "VK_KHR_get_surface_capabilities2");
         try enabled_extensions.append(alloc, "VK_EXT_surface_maintenance1");
     }
 
@@ -350,7 +905,11 @@ pub fn init(options: Options) !VkBackend {
     const instance_handle = try self.b.createInstance(&instance_ci, null);
     self.vki = vk.InstanceWrapper.load(instance_handle, self.b.dispatch.vkGetInstanceProcAddr.?);
     self.instance = vk.InstanceProxy{ .handle = instance_handle, .wrapper = &self.vki };
-    log.info("Instance created (Vulkan 1.4)", .{});
+    {
+        const t1 = std.Io.Timestamp.now(options.io, .real);
+        const dt = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / @as(f64, std.time.ns_per_ms);
+        log.info("Instance created (Vulkan 1.4) — {d:.0}ms", .{dt});
+    }
 
     if (options.validation) {
         self.debug_messenger = try self.instance.createDebugUtilsMessengerEXT(&debug_messenger_ci, null);
@@ -388,7 +947,31 @@ pub fn init(options: Options) !VkBackend {
     const gpu_props = self.instance.getPhysicalDeviceProperties(self.physical_device);
     log.info("GPU: {s}", .{@as([]const u8, &gpu_props.device_name)});
 
-    // Query device limits from Vulkan
+    var driver_props: vk.PhysicalDeviceDriverProperties = .{
+        .driver_id = @enumFromInt(0),
+        .driver_name = .{0} ** vk.MAX_DRIVER_NAME_SIZE,
+        .driver_info = .{0} ** vk.MAX_DRIVER_INFO_SIZE,
+        .conformance_version = .{ .major = 0, .minor = 0, .subminor = 0, .patch = 0 },
+    };
+    var selected_properties: vk.PhysicalDeviceProperties2 = .{
+        .p_next = @ptrCast(&driver_props),
+        .properties = gpu_props,
+    };
+    self.instance.getPhysicalDeviceProperties2(self.physical_device, &selected_properties);
+    const selected_name = propertyString(&gpu_props.device_name);
+    const driver_name = propertyString(&driver_props.driver_name);
+    const driver_info = propertyString(&driver_props.driver_info);
+    const selected_driver = if (driver_info.len != 0) driver_info else driver_name;
+    if (selected_name.len > self.selected_device_name.len) return error.BackendError;
+    if (selected_driver.len > self.selected_driver_name.len) return error.BackendError;
+    @memcpy(self.selected_device_name[0..selected_name.len], selected_name);
+    @memcpy(self.selected_driver_name[0..selected_driver.len], selected_driver);
+    self.selected_device_name_len = @intCast(selected_name.len);
+    self.selected_driver_name_len = @intCast(selected_driver.len);
+    self.selected_vendor_id = gpu_props.vendor_id;
+    self.selected_device_id = gpu_props.device_id;
+
+    // Query device limits from Vulkan.
     {
         const L = gpu_props.limits;
         self.device_limits = .{
@@ -406,7 +989,7 @@ pub fn init(options: Options) !VkBackend {
             .max_compute_shared_memory_size = L.max_compute_shared_memory_size,
             .min_uniform_buffer_offset_alignment = @intCast(L.min_uniform_buffer_offset_alignment),
             .min_storage_buffer_offset_alignment = @intCast(L.min_storage_buffer_offset_alignment),
-            // Feature flags — all enabled by the device features struct in init
+            // Feature flags — all enabled by the device features struct in init.
             .shader_object = true,
             .descriptor_buffer = true,
             .buffer_device_address = true,
@@ -419,17 +1002,65 @@ pub fn init(options: Options) !VkBackend {
     const qf_all = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(self.physical_device, alloc);
     defer alloc.free(qf_all);
     self.queue_family_index = 0;
+    var queue_timestamp_valid_bits: u32 = 0;
     for (qf_all, 0..) |qf, i| {
         if (qf.queue_flags.graphics_bit) {
             self.queue_family_index = @intCast(i);
+            queue_timestamp_valid_bits = qf.timestamp_valid_bits;
             break;
         }
     }
-    log.info("Queue family: {}", .{self.queue_family_index});
+    log.info("Queue family: {} (timestamp valid bits={})", .{
+        self.queue_family_index,
+        queue_timestamp_valid_bits,
+    });
+
+    const available_device_exts = try self.instance.enumerateDeviceExtensionPropertiesAlloc(
+        self.physical_device,
+        null,
+        alloc,
+    );
+    defer alloc.free(available_device_exts);
+    const has_google_present_timing = hasExtension(available_device_exts, "VK_GOOGLE_display_timing");
+    const has_calibrated_timestamps = hasExtension(
+        available_device_exts,
+        "VK_KHR_calibrated_timestamps",
+    );
+    const has_ext_present_timing_extensions = extPresentTimingExtensionsAvailable(
+        hasExtension(available_device_exts, "VK_EXT_present_timing"),
+        hasExtension(available_device_exts, "VK_KHR_present_id2"),
+        hasExtension(available_instance_exts, "VK_KHR_get_surface_capabilities2"),
+        has_calibrated_timestamps,
+    );
+    self.has_google_present_timing = has_google_present_timing;
+    self.has_surface_capabilities2 = hasExtension(
+        available_instance_exts,
+        "VK_KHR_get_surface_capabilities2",
+    );
+
+    // Query optional feature bits before constructing the enable chain. A
+    // feature may only be enabled after the physical device reports support.
+    var queried_vk12: vk.PhysicalDeviceVulkan12Features = .{};
+    var queried_present_id2: vk.PhysicalDevicePresentId2FeaturesKHR = .{};
+    var queried_present_timing: vk.PhysicalDevicePresentTimingFeaturesEXT = .{};
+    if (has_ext_present_timing_extensions) {
+        queried_present_id2.p_next = @ptrCast(&queried_present_timing);
+        queried_vk12.p_next = @ptrCast(&queried_present_id2);
+    }
+    var queried_features: vk.PhysicalDeviceFeatures2 = .{
+        .p_next = @ptrCast(&queried_vk12),
+        .features = .{},
+    };
+    self.instance.getPhysicalDeviceFeatures2(self.physical_device, &queried_features);
+    self.has_ext_present_timing = has_ext_present_timing_extensions and
+        queried_present_id2.present_id_2 == .true and
+        queried_present_timing.present_timing == .true;
+    self.tracy_gpu_zones = enable_tracy_gpu and
+        has_calibrated_timestamps and queried_vk12.host_query_reset == .true;
 
     var features: DeviceFeatures = .{};
-    features.init();
 
+    features.init(self.tracy_gpu_zones, self.has_ext_present_timing);
     const q_prio = [_]f32{1.0};
     const queue_ci: vk.DeviceQueueCreateInfo = .{
         .queue_family_index = self.queue_family_index,
@@ -444,7 +1075,18 @@ pub fn init(options: Options) !VkBackend {
     if (options.enable_nv_checkpoints) try dev_exts.append(alloc, "VK_NV_device_diagnostic_checkpoints");
     if (options.enable_nv_diagnostics) try dev_exts.append(alloc, "VK_NV_device_diagnostics_config");
     if (options.enable_device_fault) try dev_exts.append(alloc, "VK_EXT_device_fault");
-
+    if (has_calibrated_timestamps and
+        needsCalibratedTimestamps(self.has_ext_present_timing, self.tracy_gpu_zones))
+    {
+        try dev_exts.append(alloc, "VK_KHR_calibrated_timestamps");
+    }
+    if (self.has_ext_present_timing) {
+        try dev_exts.append(alloc, "VK_EXT_present_timing");
+        try dev_exts.append(alloc, "VK_KHR_present_id2");
+    }
+    if (has_google_present_timing) {
+        try dev_exts.append(alloc, "VK_GOOGLE_display_timing");
+    }
     // NVIDIA diagnostics config for device crash breadcrumbs.
     // Must be chained DIRECTLY to VkDeviceCreateInfo.pNext (NOT inside the features chain).
     var nv_diag_config: ?vk.DeviceDiagnosticsConfigCreateInfoNV = null;
@@ -462,21 +1104,13 @@ pub fn init(options: Options) !VkBackend {
         .pp_enabled_extension_names = dev_exts.items.ptr,
         .enabled_extension_count = @intCast(dev_exts.items.len),
     };
-    // DIAG: enumerate available device extensions to verify required ones
-    {
-        const avail_exts = try self.instance.enumerateDeviceExtensionPropertiesAlloc(self.physical_device, null, alloc);
-        defer alloc.free(avail_exts);
-        for (dev_exts.items) |req| {
-            const req_name = std.mem.sliceTo(req, 0);
-            const found = for (avail_exts) |avail| {
-                const avail_name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&avail.extension_name)), 0);
-                if (std.mem.eql(u8, req_name, avail_name)) break true;
-            } else false;
-            if (found) {
-                log.info("DIAG: device extension AVAILABLE: {s}", .{req});
-            } else {
-                log.warn("DIAG: device extension NOT AVAILABLE: {s}", .{req});
-            }
+    // DIAG: enumerate available device extensions to verify required ones.
+    for (dev_exts.items) |req| {
+        const req_name = std.mem.sliceTo(req, 0);
+        if (hasExtension(available_device_exts, req_name)) {
+            log.info("DIAG: device extension AVAILABLE: {s}", .{req});
+        } else {
+            log.warn("DIAG: device extension NOT AVAILABLE: {s}", .{req});
         }
     }
     const device_handle = try self.instance.createDevice(self.physical_device, &device_ci, null);
@@ -485,7 +1119,44 @@ pub fn init(options: Options) !VkBackend {
     const q_handle = self.device.getDeviceQueue(self.queue_family_index, 0);
     self.queue = .{ .handle = q_handle, .wrapper = &self.vkd };
 
-    log.info("Device created (shader objects + descriptor buffer + BDA)", .{});
+    self.timestamp_period = gpu_props.limits.timestamp_period;
+    self.timestamp_valid_bits = @intCast(@min(queue_timestamp_valid_bits, 64));
+    const lacks_timestamps = !timestampQueriesAvailable(self.timestamp_period, self.timestamp_valid_bits);
+    if (lacks_timestamps) {
+        self.timestamp_queries = false;
+        self.tracy_gpu_zones = false;
+        log.warn(
+            "GPU timestamps unavailable (period={d}, valid bits={})",
+            .{ self.timestamp_period, self.timestamp_valid_bits },
+        );
+    }
+
+    // ── Tracy GPU profiling: calibration + queue ──
+    if (self.tracy_gpu_zones) {
+        var calib: [2]u64 = undefined;
+        if (self.calibrateGpuTimestamps(&tracy_calib_info, &calib)) {
+            self.tracy_prev_calib_cpu = calib[0];
+            self.tracy_queue = tracy.GpuQueue.init(.{
+                .gpu_time = calib[1],
+                .period = self.timestamp_period,
+                .context = 0,
+                // Calibrated context: server uses the drift-corrected conversion
+                // and accepts per-frame GpuCalibration re-anchors.
+                .flags = .{ .calibration = true },
+                .type = .vulkan,
+                .name = "graphics",
+            });
+        } else {
+            log.warn("Tracy GPU disabled: getCalibratedTimestampsKHR failed", .{});
+            self.tracy_gpu_zones = false;
+        }
+    }
+
+    {
+        const t2 = std.Io.Timestamp.now(options.io, .real);
+        const dt = @as(f64, @floatFromInt(t2.nanoseconds - t0.nanoseconds)) / @as(f64, std.time.ns_per_ms);
+        log.info("Device created (shader objects + descriptor buffer + BDA) — {d:.0}ms total", .{dt});
+    }
 
     // Per-queue timeline semaphore for frame pacing
     self.queue_sem = try self.device.createSemaphore(
@@ -506,8 +1177,6 @@ pub fn init(options: Options) !VkBackend {
     self.setDebugName(.command_pool, @intFromEnum(self.offscreen_cmd_pool), "offscreen_cmd_pool");
     log.info("Offscreen command pool created", .{});
 
-    // Command buffer lifecycle tracking (fence-based recycling)
-    self.free_cmd_bufs = .empty;
     self.submitted_work = .empty;
 
     // ── Descriptor set layouts (no_gfx_api pattern) ─────────
@@ -568,6 +1237,12 @@ pub fn init(options: Options) !VkBackend {
         self.setDebugName(.pipeline_layout, @intFromEnum(self.pipeline_layout_graphics), "pipeline_layout_gfx");
         self.setDebugName(.pipeline_layout, @intFromEnum(self.pipeline_layout_compute), "pipeline_layout_comp");
         log.info("Pipeline layouts created", .{});
+    }
+
+    {
+        const t_end = std.Io.Timestamp.now(options.io, .real);
+        const dt = @as(f64, @floatFromInt(t_end.nanoseconds - t_start.nanoseconds)) / @as(f64, std.time.ns_per_ms);
+        log.info("VkBackend init complete — {d:.0}ms total", .{dt});
     }
 
     return self;
@@ -645,6 +1320,10 @@ pub fn deinit(self: *VkBackend) void {
     }
     self.desc_heaps.deinit(self.allocator);
     self.pending_free.deinit(self.allocator);
+    for (self.timestamp_query_sets.items) |entry| {
+        if (entry.valid) self.device.destroyQueryPool(entry.pool, null);
+    }
+    self.timestamp_query_sets.deinit(self.allocator);
     // Destroy cached texture views to prevent VkImageView leaks
     {
         var it = self.texture_view_cache.iterator();
@@ -673,7 +1352,6 @@ pub fn deinit(self: *VkBackend) void {
         self.allocator.free(work.cmds);
     }
     self.submitted_work.deinit(self.allocator);
-    self.free_cmd_bufs.deinit(self.allocator);
     self.device.destroySemaphore(self.queue_sem, null);
     if (self.offscreen_cmd_pool != .null_handle)
         self.device.destroyCommandPool(self.offscreen_cmd_pool, null);
@@ -688,30 +1366,47 @@ pub fn numWindows(self: *const VkBackend) u32 {
     return @intCast(self.windows.items.len);
 }
 
-pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Extent2D) !u32 {
-    // Find tombstone slot or append
+pub fn addWindow(
+    self: *VkBackend,
+    surface: vk.SurfaceKHR,
+    initial_extent: Extent2D,
+    present_mode: vk.PresentModeKHR,
+) !u32 {
+    // Find tombstone slot or append.
     for (self.windows.items, 0..) |*w, i| {
         if (!w.valid) {
             log.info("addWindow: reusing tombstone slot {}", .{i});
+            const timing_support = self.querySurfacePresentTimingSupport(surface);
             w.* = Window{
                 .surface = surface,
                 .extent = initial_extent,
                 .requested_extent = initial_extent,
+                .present_mode = present_mode,
                 .frames_in_flight = self.frames_in_flight,
+                .timing_mode = resolveSurfacePresentTimingMode(
+                    self.has_ext_present_timing,
+                    timing_support,
+                    self.has_google_present_timing,
+                ),
+                .present_stage_queries = timing_support.stage orelse .{},
+                .present_stage_support = timing_support.supported_stages,
             };
             try initPerFrameSemaphoreLists(self, w);
             try createSwapchainResources(self, w);
             try createPresentSemaphores(self, w);
             if (use_swapchain_maintenance1) {
                 try w.present_done_fences.ensureTotalCapacity(self.allocator, self.frames_in_flight);
-                {
-                    var name_buf: [64]u8 = undefined;
-                    for (0..self.frames_in_flight) |f| {
-                        const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
-                        const fname = std.fmt.bufPrintZ(&name_buf, "present_fence[{}]", .{f}) catch "present_fence";
-                        self.setDebugName(.fence, @intFromEnum(fence), fname);
-                        w.present_done_fences.appendAssumeCapacity(fence);
-                    }
+                var name_buf: [64]u8 = undefined;
+                for (0..self.frames_in_flight) |f| {
+                    const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+                    const fname = std.fmt.bufPrintSentinel(
+                        &name_buf,
+                        "present_fence[{}]",
+                        .{f},
+                        0,
+                    ) catch "present_fence";
+                    self.setDebugName(.fence, @intFromEnum(fence), fname);
+                    w.present_done_fences.appendAssumeCapacity(fence);
                 }
             }
             try createPerFrameResources(self, w);
@@ -719,13 +1414,23 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
             return @intCast(i);
         }
     }
+
     const idx = self.windows.items.len;
     log.info("addWindow: initPerFrameSemaphoreLists", .{});
+    const timing_support = self.querySurfacePresentTimingSupport(surface);
     var win: Window = .{
         .surface = surface,
         .extent = initial_extent,
         .requested_extent = initial_extent,
+        .present_mode = present_mode,
         .frames_in_flight = self.frames_in_flight,
+        .timing_mode = resolveSurfacePresentTimingMode(
+            self.has_ext_present_timing,
+            timing_support,
+            self.has_google_present_timing,
+        ),
+        .present_stage_queries = timing_support.stage orelse .{},
+        .present_stage_support = timing_support.supported_stages,
     };
     try initPerFrameSemaphoreLists(self, &win);
     log.info("addWindow: createSwapchainResources", .{});
@@ -734,14 +1439,17 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
     try createPresentSemaphores(self, &win);
     if (use_swapchain_maintenance1) {
         try win.present_done_fences.ensureTotalCapacity(self.allocator, self.frames_in_flight);
-        {
-            var name_buf: [64]u8 = undefined;
-            for (0..self.frames_in_flight) |f| {
-                const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
-                const fname = std.fmt.bufPrintZ(&name_buf, "present_fence[{}]", .{f}) catch "present_fence";
-                self.setDebugName(.fence, @intFromEnum(fence), fname);
-                win.present_done_fences.appendAssumeCapacity(fence);
-            }
+        var name_buf: [64]u8 = undefined;
+        for (0..self.frames_in_flight) |f| {
+            const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+            const fname = std.fmt.bufPrintSentinel(
+                &name_buf,
+                "present_fence[{}]",
+                .{f},
+                0,
+            ) catch "present_fence";
+            self.setDebugName(.fence, @intFromEnum(fence), fname);
+            win.present_done_fences.appendAssumeCapacity(fence);
         }
     }
     log.info("addWindow: createPerFrameResources", .{});
@@ -768,6 +1476,7 @@ pub fn removeWindow(self: *VkBackend, index: u32) void {
 pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
+    win.slop_ns = 0;
 
     // Handle resize
     if (win.needs_resize) {
@@ -777,6 +1486,7 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
         defer self.queue_mutex.unlock(self.io);
         if (use_swapchain_maintenance1) {
             for (win.present_done_fences.items) |f| {
+                const t_wf_resize = std.Io.Timestamp.now(self.io, .awake);
                 const zone_wf_resize = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
                 defer zone_wf_resize.end();
                 _ = try self.device.waitForFences(
@@ -784,11 +1494,14 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
                     .true,
                     std.math.maxInt(u64),
                 );
+                win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_wf_resize.nanoseconds);
             }
         } else {
+            const t_dwi = std.Io.Timestamp.now(self.io, .awake);
             const zone_dwi_bf = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
             defer zone_dwi_bf.end();
             try self.device.deviceWaitIdle();
+            win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_dwi.nanoseconds);
         }
         try recreateSwapchain(self, win);
         win.needs_resize = false;
@@ -801,6 +1514,7 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     const recreated = blk: {
         const zone_acq = tracy.Zone.begin(.{ .name = "acquireImage", .src = @src(), .color = .tomato });
         defer zone_acq.end();
+        const t_acq = std.Io.Timestamp.now(self.io, .awake);
         const acq = self.device.acquireNextImageKHR(
             win.swapchain,
             std.math.maxInt(u64),
@@ -815,16 +1529,20 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
         };
         win.image_index = acq.image_index;
         _ = try self.device.waitForFences(([_]vk.Fence{acq_fence})[0..], .true, std.math.maxInt(u64));
+        win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_acq.nanoseconds);
         break :blk acq.result == .suboptimal_khr;
     };
 
     // Wait for previous frame to finish before reusing pool/fence
     {
+        const t_wf_cmd = std.Io.Timestamp.now(self.io, .awake);
         const zone_wf_cmd = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
         defer zone_wf_cmd.end();
         _ = try self.device.waitForFences(win.cmd_pool_ready.items[frame..][0..1], .true, std.math.maxInt(u64));
+        win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_wf_cmd.nanoseconds);
     }
     try self.device.resetFences(win.cmd_pool_ready.items[frame..][0..1]);
+    if (self.tracy_gpu_zones) try self.collectTracyGpuQueries(win, frame);
     {
         const zone_rcp = tracy.Zone.begin(.{ .name = "resetCmdPool", .src = @src(), .color = .tomato });
         defer zone_rcp.end();
@@ -838,9 +1556,12 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
         log.err("beginFrame: beginCommandBuffer failed: {}", .{err});
     {
         var name_buf: [64]u8 = undefined;
-        const label = std.fmt.bufPrintZ(&name_buf, "Frame {}", .{self.queue_counter}) catch "Frame";
+        const label = std.fmt.bufPrintSentinel(&name_buf, "Frame {}", .{self.queue_counter}, 0) catch "Frame";
         self.cmdBeginDebugLabel(win.cmd_buffers.items[frame].handle, label, .{ 0.2, 0.6, 1.0, 1.0 });
     }
+    // Tracy GPU frame zone: labels which swapchain image this frame renders into,
+    // so in-flight frames are identifiable on the GPU timeline.
+    if (self.tracy_gpu_zones) self.beginFrameGpuZone(win, frame, win.image_index);
     {
         const barrier: vk.ImageMemoryBarrier2 = .{
             .image = win.images.items[win.image_index],
@@ -881,6 +1602,25 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
     const img_idx = win.image_index;
+    var frame_result = frameResultForPresentQueue(.success);
+
+    // Validate timing IDs before any command recording, submission, or state
+    // mutation. All later timing setup is infallible stack construction.
+    if (present) |p| {
+        if (p.timing_id) |timing_id| {
+            if (p.blit_to_swapchain) {
+                try validatePresentTimingRequest(
+                    win.timing_mode,
+                    win.last_present_timing_id,
+                    timing_id,
+                    win.outstanding_timed_presents,
+                    max_present_feedback,
+                );
+            } else {
+                try validatePresentTimingId(win.timing_mode, win.last_present_timing_id, timing_id);
+            }
+        }
+    }
 
     self.cmdInsertDebugLabel(win.cmd_buffers.items[frame].handle, "Present", .{ 0.2, 0.4, 0.8, 1.0 });
 
@@ -909,6 +1649,8 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
             .p_image_memory_barriers = @ptrCast(&barrier),
         });
     }
+
+    if (self.tracy_gpu_zones) self.endFrameGpuZone(win, frame);
 
     try win.cmd_buffers.items[frame].endCommandBuffer();
 
@@ -993,9 +1735,23 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
     if (present) |p| {
         if (p.blit_to_swapchain) {
             var fence_info: if (use_swapchain_maintenance1) vk.SwapchainPresentFenceInfoEXT else void = undefined;
-            const af_present = if (use_swapchain_maintenance1) blk: {
+            var present_id2_info: vk.PresentId2KHR = undefined;
+            var present_times_info: vk.PresentTimesInfoGOOGLE = undefined;
+            var google_time: vk.PresentTimeGOOGLE = undefined;
+            var present_timings_info: vk.PresentTimingsInfoEXT = undefined;
+            var timing_info_ext: vk.PresentTimingInfoEXT = undefined;
+            var timing_id_copy: u64 = 0;
+            const base_present: vk.PresentInfoKHR = .{
+                .wait_semaphore_count = 1,
+                .p_wait_semaphores = @ptrCast(&present_sem),
+                .swapchain_count = 1,
+                .p_swapchains = @ptrCast(&win.swapchain),
+                .p_image_indices = @ptrCast(&img_idx),
+            };
+            var af_present = if (use_swapchain_maintenance1) blk: {
                 const pfence = win.present_done_fences.items[frame];
                 // Wait for this frame's previous present to complete
+                const t_wf_p = std.Io.Timestamp.now(self.io, .awake);
                 const zone_wf_p = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
                 defer zone_wf_p.end();
                 _ = try self.device.waitForFences(
@@ -1003,43 +1759,115 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
                     .true,
                     std.math.maxInt(u64),
                 );
+                win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_wf_p.nanoseconds);
                 try self.device.resetFences(&[_]vk.Fence{pfence});
                 fence_info = .{ .swapchain_count = 1, .p_fences = @ptrCast(&pfence) };
-                break :blk vk.PresentInfoKHR{
-                    .p_next = @ptrCast(&fence_info),
-                    .wait_semaphore_count = 1,
-                    .p_wait_semaphores = @ptrCast(&present_sem),
-                    .swapchain_count = 1,
-                    .p_swapchains = @ptrCast(&win.swapchain),
-                    .p_image_indices = @ptrCast(&img_idx),
+                var chained = base_present;
+                chained.p_next = @ptrCast(&fence_info);
+                break :blk chained;
+            } else base_present;
+            const present_tail = af_present.p_next;
+            if (p.timing_id) |timing_id| {
+                timing_id_copy = timing_id;
+                const stage_bits: u32 = switch (win.timing_mode) {
+                    .ext => @bitCast(win.present_stage_queries),
+                    .google, .unsupported => 0,
                 };
-            } else vk.PresentInfoKHR{
-                .wait_semaphore_count = 1,
-                .p_wait_semaphores = @ptrCast(&present_sem),
-                .swapchain_count = 1,
-                .p_swapchains = @ptrCast(&win.swapchain),
-                .p_image_indices = @ptrCast(&img_idx),
-            };
+                const time_domain_id: u64 = if (win.timing_mode == .ext)
+                    win.time_domain_id
+                else
+                    0;
+                win.present_timing_diagnostics.notePresentRequest(
+                    win.timing_mode,
+                    timing_id,
+                    stage_bits,
+                    time_domain_id,
+                );
+                switch (win.timing_mode) {
+                    .ext => {
+                        const stage = win.present_stage_queries;
+                        present_timings_info = .{
+                            .p_next = present_tail,
+                            .swapchain_count = 1,
+                            .p_timing_infos = @ptrCast(&timing_info_ext),
+                        };
+                        timing_info_ext = .{
+                            .target_time = 0,
+                            .time_domain_id = win.time_domain_id,
+                            .present_stage_queries = stage,
+                            .target_time_domain_present_stage = stage,
+                        };
+                        present_id2_info = .{
+                            .p_next = @ptrCast(&present_timings_info),
+                            .swapchain_count = 1,
+                            .p_present_ids = @ptrCast(&timing_id_copy),
+                        };
+                        af_present.p_next = @ptrCast(&present_id2_info);
+                    },
+                    .google => {
+                        google_time = .{ .present_id = @intCast(timing_id), .desired_present_time = 0 };
+                        present_times_info = .{
+                            .p_next = present_tail,
+                            .swapchain_count = 1,
+                            .p_times = @ptrCast(&google_time),
+                        };
+                        af_present.p_next = @ptrCast(&present_times_info);
+                    },
+                    .unsupported => unreachable,
+                }
+            }
+            const t_present = std.Io.Timestamp.now(self.io, .awake);
             const zone_present = tracy.Zone.begin(.{ .name = "queuePresent", .src = @src(), .color = .tomato });
             defer zone_present.end();
-            if (self.queue.presentKHR(&af_present)) |_| {
+            if (self.queue.presentKHR(&af_present)) |present_result| {
+                const present_result_kind = presentQueueResult(present_result);
+                frame_result = frameResultForPresentQueue(present_result_kind);
+                if (p.timing_id != null) {
+                    win.present_timing_diagnostics.notePresentResult(present_result_kind);
+                }
+                if (p.timing_id) |timing_id| {
+                    win.last_present_timing_id = timing_id;
+                    win.outstanding_timed_presents += 1;
+                    if (win.first_timed_present_start_ns == null) {
+                        win.first_timed_present_start_ns = t_present;
+                        win.present_timing_diagnostics.first_timed_present_start_ns = t_present.nanoseconds;
+                    }
+                    win.present_timing_diagnostics.outstanding_timed_presents = win.outstanding_timed_presents;
+                }
                 if (win.retired_swapchain != .null_handle) {
                     self.device.destroySwapchainKHR(win.retired_swapchain, null);
                     win.retired_swapchain = .null_handle;
                 }
+                // Annotate the presentation on the CPU timeline; the GPU frame zone
+                // named "img {M}" identifies this frame on the GPU timeline.
+                if (self.tracy_gpu_zones) {
+                    var msg_buf: [64]u8 = undefined;
+                    const msg = std.fmt.bufPrint(
+                        &msg_buf,
+                        "present frame {d} (img {d})",
+                        .{ signal_val, win.image_index },
+                    ) catch "present frame";
+                    tracy.message(.{ .text = msg, .color = .green });
+                }
             } else |e| {
-                if (e == error.OutOfDateKHR) {
-                    win.needs_resize = true;
-                } else {
+                const present_failure = presentQueueFailure(e);
+                if (p.timing_id != null) {
+                    win.present_timing_diagnostics.notePresentFailure(present_failure);
+                }
+                frame_result = notePresentQueueFailure(win, e);
+                if (present_failure == .timing_queue_full) {
+                    return e;
+                }
+                if (!frame_result.present_out_of_date) {
                     log.warn("endFrame: present failed: {}", .{e});
                 }
             }
+            win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_present.nanoseconds);
         }
     }
 
-    if (win.resize_throttle > 0) win.resize_throttle -= 1;
-    win.frame_index = (frame + 1) % win.frames_in_flight;
-    return .{ .gpu_blocked_ns = 0 };
+    advanceFrame(win, frame);
+    return frame_result;
 }
 pub fn getCurrentCmdBuf(self: *VkBackend, window_index: u32) CommandBufferHandle {
     const win = &self.windows.items[window_index];
@@ -1059,34 +1887,108 @@ pub fn waitIdle(self: *VkBackend) !void {
         }
         return err;
     };
+    self.reclaimSubmittedWork();
 }
 
-pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) !void {
-    // NVIDIA checkpoint: set breadcrumb before each submission
+const TimelineWait = struct {
+    semaphore: SemaphoreHandle,
+    value: u64,
+};
+
+const TimelineSignal = struct {
+    semaphore: SemaphoreHandle,
+    value: u64,
+};
+
+fn queueSubmitTracked(
+    self: *VkBackend,
+    handles: []const CommandBufferHandle,
+    wait: ?TimelineWait,
+    signal: ?TimelineSignal,
+) !void {
+    if (handles.len == 0) return;
+    if (wait) |wait_timeline| {
+        if (signal) |signal_timeline| {
+            if (wait_timeline.semaphore == signal_timeline.semaphore and
+                wait_timeline.value >= signal_timeline.value)
+            {
+                return error.InvalidTimelineOrder;
+            }
+        }
+    }
+
+    self.queue_mutex.lockUncancelable(self.io);
+    defer self.queue_mutex.unlock(self.io);
+
+    const cmds_copy = try self.allocator.dupe(vk.CommandBuffer, handles);
+    var tracking_owned = true;
+    defer if (tracking_owned) self.allocator.free(cmds_copy);
+
+    try self.submitted_work.ensureUnusedCapacity(self.allocator, 1);
+    const fence = try self.device.createFence(&.{}, null);
+    var submitted = false;
+    errdefer {
+        if (!submitted) {
+            self.device.freeCommandBuffers(self.offscreen_cmd_pool, handles);
+            self.device.destroyFence(fence, null);
+        }
+    }
+
+    // The preflight above leaves all fallible ownership operations complete before
+    // command buffers are ended or submitted.
     if (self.enable_nv_checkpoints) {
         for (handles) |h| {
             self.checkpoint_counter += 1;
-            const cp = self.checkpoint_counter;
-            self.device.cmdSetCheckpointNV(h, @ptrCast(&cp));
+            const checkpoint = self.checkpoint_counter;
+            self.device.cmdSetCheckpointNV(h, @ptrCast(&checkpoint));
         }
     }
     for (handles) |h| try self.device.endCommandBuffer(h);
-    self.queue_mutex.lockUncancelable(self.io);
-    defer self.queue_mutex.unlock(self.io);
-    const fence = try self.device.createFence(&.{}, null);
-    errdefer self.device.destroyFence(fence, null);
-    const si: vk.SubmitInfo = .{
+
+    var timeline_info: vk.TimelineSemaphoreSubmitInfo = .{};
+    var wait_semaphores: [1]vk.Semaphore = undefined;
+    var wait_values: [1]u64 = undefined;
+    var wait_stage_masks: [1]vk.PipelineStageFlags = undefined;
+    var signal_semaphores: [1]vk.Semaphore = undefined;
+    var signal_values: [1]u64 = undefined;
+    if (wait) |timeline| {
+        wait_semaphores[0] = timeline.semaphore;
+        wait_values[0] = timeline.value;
+        wait_stage_masks[0] = .{ .all_commands_bit = true };
+    }
+    if (signal) |timeline| {
+        signal_semaphores[0] = timeline.semaphore;
+        signal_values[0] = timeline.value;
+    }
+    timeline_info = .{
+        .wait_semaphore_value_count = if (wait != null) 1 else 0,
+        .p_wait_semaphore_values = if (wait != null) @ptrCast(&wait_values) else null,
+        .signal_semaphore_value_count = if (signal != null) 1 else 0,
+        .p_signal_semaphore_values = if (signal != null) @ptrCast(&signal_values) else null,
+    };
+    const submit_info: vk.SubmitInfo = .{
+        .p_next = if (wait != null or signal != null) @ptrCast(&timeline_info) else null,
         .command_buffer_count = @intCast(handles.len),
         .p_command_buffers = handles.ptr,
+        .wait_semaphore_count = if (wait != null) 1 else 0,
+        .p_wait_semaphores = if (wait != null) @ptrCast(&wait_semaphores) else null,
+        .p_wait_dst_stage_mask = if (wait != null) @ptrCast(&wait_stage_masks) else null,
+        .signal_semaphore_count = if (signal != null) 1 else 0,
+        .p_signal_semaphores = if (signal != null) @ptrCast(&signal_semaphores) else null,
     };
     {
         const zone_qs = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
         defer zone_qs.end();
-        try self.queue.submit(&.{si}, fence);
+        try self.queue.submit(&.{submit_info}, fence);
     }
-    const cmds_copy = try self.allocator.dupe(vk.CommandBuffer, handles);
-    errdefer self.allocator.free(cmds_copy);
-    try self.submitted_work.append(self.allocator, .{ .cmds = cmds_copy, .fence = fence });
+
+    submitted = true;
+    self.submitted_work.appendAssumeCapacity(.{ .cmds = cmds_copy, .fence = fence });
+    tracking_owned = false;
+}
+
+pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) !void {
+    try self.queueSubmitTracked(handles, null, null);
 }
 
 /// Set an NVIDIA diagnostic checkpoint in a command buffer.
@@ -1171,7 +2073,10 @@ pub fn queryDeviceFault(self: *VkBackend) void {
                 log.warn("  Fault addresses ({d})", .{ac});
                 for (addr_infos[0..ac]) |ai| {
                     const atype = addressTypeName(ai.address_type);
-                    log.warn("    [{s}] addr=0x{x} precision={d} bytes", .{ atype, ai.reported_address, @as(u64, ai.address_precision) });
+                    log.warn(
+                        "    [{s}] addr=0x{x} precision={d} bytes",
+                        .{ atype, ai.reported_address, @as(u64, ai.address_precision) },
+                    );
                 }
             } else {
                 log.warn("  No address info — fault may be a TDR timeout, not a page fault", .{});
@@ -1195,7 +2100,12 @@ pub fn queryLastCheckpoint(self: *VkBackend) u32 {
         const count = @min(data_count, 64);
         var data: [64]vk.CheckpointDataNV = undefined;
         for (&data) |*d| {
-            d.* = .{ .s_type = .checkpoint_data_nv, .p_next = null, .stage = .{}, .p_checkpoint_marker = @ptrCast(&d.stage) };
+            d.* = .{
+                .s_type = .checkpoint_data_nv,
+                .p_next = null,
+                .stage = .{},
+                .p_checkpoint_marker = @ptrCast(&d.stage),
+            };
         }
         var query_count: u32 = count;
         self.device.getQueueCheckpointDataNV(self.queue.handle, &query_count, &data);
@@ -1223,46 +2133,49 @@ pub fn queueSubmitSignal(
     sem: SemaphoreHandle,
     value: u64,
 ) !void {
-    self.queue_mutex.lockUncancelable(self.io);
-    defer self.queue_mutex.unlock(self.io);
-    const ts: vk.TimelineSemaphoreSubmitInfo = .{
-        .signal_semaphore_value_count = 1,
-        .p_signal_semaphore_values = @ptrCast(&value),
-    };
-    const sems = [_]vk.Semaphore{sem};
-    const si: vk.SubmitInfo = .{
-        .p_next = @ptrCast(&ts),
-        .command_buffer_count = @intCast(handles.len),
-        .p_command_buffers = handles.ptr,
-        .signal_semaphore_count = 1,
-        .p_signal_semaphores = @ptrCast(&sems),
-    };
-    {
-        const zone_qss = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
-        defer zone_qss.end();
-        try self.queue.submit(&.{si}, .null_handle);
-    }
+    try self.queueSubmitTracked(handles, null, .{ .semaphore = sem, .value = value });
 }
 
-pub fn commandsBegin(self: *VkBackend) !CommandBufferHandle {
-    // Recycle: free command buffers from completed submissions.
-    var i: usize = 0;
-    while (i < self.submitted_work.items.len) {
-        const work = self.submitted_work.items[i];
+pub fn queueSubmitWaitSignal(
+    self: *VkBackend,
+    handles: []const CommandBufferHandle,
+    wait_sem: SemaphoreHandle,
+    wait_value: u64,
+    signal_sem: SemaphoreHandle,
+    signal_value: u64,
+) !void {
+    try self.queueSubmitTracked(
+        handles,
+        .{ .semaphore = wait_sem, .value = wait_value },
+        .{ .semaphore = signal_sem, .value = signal_value },
+    );
+}
+
+fn reclaimSubmittedWork(self: *VkBackend) void {
+    var index: usize = 0;
+    while (index < self.submitted_work.items.len) {
+        const work = self.submitted_work.items[index];
         const status = self.device.getFenceStatus(work.fence) catch |err| {
-            log.warn("commandsBegin: getFenceStatus failed: {}", .{err});
-            i += 1;
+            log.warn("reclaimSubmittedWork: getFenceStatus failed: {}", .{err});
+            index += 1;
             continue;
         };
         if (status == .success) {
             self.device.freeCommandBuffers(self.offscreen_cmd_pool, work.cmds);
             self.device.destroyFence(work.fence, null);
             self.allocator.free(work.cmds);
-            _ = self.submitted_work.swapRemove(i);
+            _ = self.submitted_work.swapRemove(index);
         } else {
-            i += 1;
+            index += 1;
         }
     }
+}
+
+pub fn commandsBegin(self: *VkBackend) !CommandBufferHandle {
+    self.queue_mutex.lockUncancelable(self.io);
+    defer self.queue_mutex.unlock(self.io);
+    self.reclaimSubmittedWork();
+
     var cb: vk.CommandBuffer = undefined;
     try self.device.allocateCommandBuffers(&.{
         .command_pool = self.offscreen_cmd_pool,
@@ -1273,12 +2186,6 @@ pub fn commandsBegin(self: *VkBackend) !CommandBufferHandle {
     return cb;
 }
 
-pub fn commandsEnd(self: *VkBackend, cmd: CommandBufferHandle) void {
-    // queueSubmit handles endCommandBuffer internally.
-    // Mark the CB for deferred free after its submission fence completes.
-    self.free_cmd_bufs.append(self.allocator, cmd) catch |err| log.warn("commandsEnd: append failed: {}", .{err});
-}
-
 pub fn queueWaitIdle(self: *VkBackend) !void {
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
@@ -1286,6 +2193,409 @@ pub fn queueWaitIdle(self: *VkBackend) !void {
     defer zone_qw.end();
     try self.queue.waitIdle();
 }
+pub fn timestampInfo(self: *const VkBackend) ?TimestampInfo {
+    if (!self.timestamp_queries) return null;
+    return .{
+        .period_ns = @floatCast(self.timestamp_period),
+        .valid_bits = self.timestamp_valid_bits,
+    };
+}
+
+fn timestampQueryEntry(self: *VkBackend, handle: TimestampQueryHandle) !*TimestampQueryEntry {
+    const raw = @intFromEnum(handle);
+    if (raw == 0) return error.InvalidTimestampHandle;
+    const index: usize = @intCast(raw - 1);
+    if (index >= self.timestamp_query_sets.items.len) return error.InvalidTimestampHandle;
+    const entry = &self.timestamp_query_sets.items[index];
+    if (!entry.valid) return error.InvalidTimestampHandle;
+    return entry;
+}
+
+pub fn timestampQuerySetCreate(self: *VkBackend, count: u32) !TimestampQueryHandle {
+    if (!self.timestamp_queries) return error.TimestampQueriesUnsupported;
+    try TimestampQuerySet.validateQueryRange(count, 0, count);
+    const pool = try self.device.createQueryPool(&.{
+        .query_type = .timestamp,
+        .query_count = count,
+    }, null);
+    errdefer self.device.destroyQueryPool(pool, null);
+
+    for (self.timestamp_query_sets.items, 0..) |*entry, i| {
+        if (!entry.valid) {
+            entry.* = .{ .valid = true, .pool = pool, .count = count };
+            return @enumFromInt(@as(u32, @intCast(i + 1)));
+        }
+    }
+    if (self.timestamp_query_sets.items.len >= std.math.maxInt(u32)) {
+        return error.TooManyTimestampQuerySets;
+    }
+    try self.timestamp_query_sets.append(self.allocator, .{
+        .valid = true,
+        .pool = pool,
+        .count = count,
+    });
+    return @enumFromInt(@as(u32, @intCast(self.timestamp_query_sets.items.len)));
+}
+
+pub fn timestampQuerySetDestroy(self: *VkBackend, handle: TimestampQueryHandle) void {
+    const raw = @intFromEnum(handle);
+    if (raw == 0) return;
+    const index: usize = @intCast(raw - 1);
+    if (index >= self.timestamp_query_sets.items.len) return;
+    const entry = &self.timestamp_query_sets.items[index];
+    if (!entry.valid) return;
+    const pool = entry.pool;
+    entry.* = .{};
+    self.device.destroyQueryPool(pool, null);
+}
+
+pub fn timestampQuerySetRead(
+    self: *VkBackend,
+    handle: TimestampQueryHandle,
+    first: u32,
+    out: []u64,
+) !void {
+    if (!self.timestamp_queries) return error.TimestampQueriesUnsupported;
+    if (out.len == 0 or out.len > std.math.maxInt(u32)) return error.InvalidTimestampRange;
+    const entry = try self.timestampQueryEntry(handle);
+    try TimestampQuerySet.validateQueryRange(entry.count, first, @intCast(out.len));
+    const result = try self.device.getQueryPoolResults(
+        entry.pool,
+        first,
+        @intCast(out.len),
+        out.len * @sizeOf(u64),
+        @ptrCast(out.ptr),
+        @sizeOf(u64),
+        .{ .@"64_bit" = true },
+    );
+    if (result == .not_ready) return error.NotReady;
+}
+pub fn presentTimingSupported(self: *const VkBackend, window_index: u32) bool {
+    if (window_index >= self.windows.items.len) return false;
+    return self.windows.items[window_index].timing_mode != .unsupported;
+}
+
+/// Poll completed presentation feedback into caller storage without allocating.
+/// The available record count is probed first; OutputTooSmall is returned before
+/// any record is consumed so feedback is never truncated or dropped.
+pub fn pollPresentFeedback(self: *VkBackend, window_index: u32, out: []PresentFeedback) !usize {
+    const win = &self.windows.items[window_index];
+    switch (win.timing_mode) {
+        .unsupported => return error.PresentTimingUnsupported,
+        .ext => return self.pollPresentFeedbackExt(win, out),
+        .google => return self.pollPresentFeedbackGoogle(win, out),
+    }
+}
+fn googlePresentTimingIdRangeUsable(win: *const Window) bool {
+    const max_google_id: u64 = std.math.maxInt(u32);
+    return win.last_present_timing_id < max_google_id and
+        win.last_feedback_id < max_google_id;
+}
+
+/// Abandon the current timing measurement without retaining its ownership.
+/// EXT failures may restart on the independently enabled GOOGLE backend when
+/// the next Google ID remains representable; a failed Google block is terminal.
+/// Present and feedback high-water marks remain validation state across
+/// backend transitions, preventing stale or duplicate IDs after fallback.
+fn abandonPresentTiming(win: *Window, google_available: bool) void {
+    const use_google = win.timing_mode == .ext and
+        google_available and
+        googlePresentTimingIdRangeUsable(win);
+    win.timing_mode = if (use_google) .google else .unsupported;
+    win.present_stage_queries = .{};
+    win.present_stage_support = .{};
+    win.present_time_domain_count = 0;
+    win.time_domain_id = 0;
+    win.time_domain_valid = false;
+    win.outstanding_timed_presents = 0;
+    win.first_timed_present_start_ns = null;
+    win.present_timing_diagnostics.mode = win.timing_mode;
+    win.present_timing_diagnostics.outstanding_timed_presents = 0;
+    win.present_timing_diagnostics.watchdog_triggered = true;
+}
+
+fn pollPresentFeedbackExt(self: *VkBackend, win: *Window, out: []PresentFeedback) !usize {
+    // The count probe must pass a true null timing pointer. The nullable
+    // ABI mirror preserves the required C layout while avoiding a dummy
+    // address in the generated non-null Vulkan declaration.
+    var probe_properties: PastPresentationTimingPropertiesProbe = .{};
+    const probe_info: vk.PastPresentationTimingInfoEXT = .{
+        .flags = .{},
+        .swapchain = win.swapchain,
+    };
+    const probe_result = self.device.getPastPresentationTimingEXT(
+        &probe_info,
+        @ptrCast(&probe_properties),
+    ) catch |err| {
+        win.present_timing_diagnostics.noteExtProbe(
+            .failed,
+            0,
+            probe_properties.timing_properties_counter,
+            probe_properties.time_domains_counter,
+        );
+        return err;
+    };
+    const available_u32 = probe_properties.presentation_timing_count;
+    win.present_timing_diagnostics.noteExtProbe(
+        presentTimingCallResult(probe_result),
+        available_u32,
+        probe_properties.timing_properties_counter,
+        probe_properties.time_domains_counter,
+    );
+    if (available_u32 == 0) {
+        if (win.outstanding_timed_presents != 0) {
+            win.present_timing_diagnostics.ext_empty_probe_polls +|= 1;
+            const now_ns = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+            const first_pending_start_ns = if (win.first_timed_present_start_ns) |start|
+                start.nanoseconds
+            else
+                null;
+            win.present_timing_diagnostics.watchdog_last_now_ns = now_ns;
+            win.present_timing_diagnostics.watchdog_elapsed_ns =
+                if (first_pending_start_ns) |start| if (now_ns >= start) now_ns - start else 0 else 0;
+            if (presentTimingWatchdogDecision(
+                win.outstanding_timed_presents,
+                first_pending_start_ns,
+                now_ns,
+            ) == .disable) {
+                abandonPresentTiming(win, self.has_google_present_timing);
+                win.present_timing_diagnostics.notePollResult(0);
+                return error.PresentTimingDataUnavailable;
+            }
+        } else {
+            win.first_timed_present_start_ns = null;
+            win.present_timing_diagnostics.ext_empty_probe_polls = 0;
+        }
+        win.present_timing_diagnostics.notePollResult(0);
+        return 0;
+    }
+    win.present_timing_diagnostics.ext_empty_probe_polls = 0;
+    try validatePresentFeedbackBatch(win.outstanding_timed_presents, available_u32, out.len);
+    const available: usize = @intCast(available_u32);
+
+    for (
+        win.present_scratch.ext_records[0..available],
+        win.present_scratch.ext_stages[0..available],
+    ) |*record, *stage| {
+        stage.* = .{ .stage = win.present_stage_queries, .time = 0 };
+        record.* = .{
+            .present_id = 0,
+            .target_time = 0,
+            .present_stage_count = 1,
+            .p_present_stages = @ptrCast(stage),
+            .time_domain = .swapchain_local_ext,
+            .time_domain_id = win.time_domain_id,
+            .report_complete = .false,
+        };
+    }
+
+    var properties: vk.PastPresentationTimingPropertiesEXT = .{
+        .timing_properties_counter = 0,
+        .time_domains_counter = 0,
+        .presentation_timing_count = available_u32,
+        .p_presentation_timings = @ptrCast(win.present_scratch.ext_records[0..available].ptr),
+    };
+    const retrieve_result = self.device.getPastPresentationTimingEXT(&probe_info, &properties) catch |err| {
+        win.present_timing_diagnostics.noteExtRetrieve(
+            .failed,
+            0,
+            properties.timing_properties_counter,
+            properties.time_domains_counter,
+        );
+        return err;
+    };
+    win.present_timing_diagnostics.noteExtRetrieve(
+        presentTimingCallResult(retrieve_result),
+        properties.presentation_timing_count,
+        properties.timing_properties_counter,
+        properties.time_domains_counter,
+    );
+    if (properties.presentation_timing_count > available_u32) {
+        return error.PresentFeedbackBackendError;
+    }
+    const retrieved: usize = @intCast(properties.presentation_timing_count);
+    for (
+        win.present_scratch.ext_records[0..retrieved],
+        win.present_scratch.records[0..retrieved],
+    ) |record, *normalized| {
+        const actual_ns = presentStageTimestamp(record);
+        const first_stage = if (record.present_stage_count != 0)
+            record.p_present_stages[0]
+        else
+            vk.PresentStageTimeEXT{ .stage = .{}, .time = 0 };
+        win.present_timing_diagnostics.noteExtRecord(
+            record.present_id,
+            record.present_stage_count,
+            first_stage.stage,
+            actual_ns,
+            record.report_complete == .true,
+        );
+        normalized.* = .{
+            .present_id = record.present_id,
+            .actual_present_ns = actual_ns,
+            .completed = record.report_complete == .true,
+        };
+    }
+    const completed = commitPresentFeedbackBatch(
+        .ext,
+        &win.last_feedback_id,
+        &win.outstanding_timed_presents,
+        win.present_scratch.records[0..retrieved],
+        win.present_scratch.normalized[0..retrieved],
+        out,
+    ) catch |err| {
+        if (err == error.PresentTimingDataUnavailable) {
+            abandonPresentTiming(win, self.has_google_present_timing);
+        }
+        if (win.outstanding_timed_presents == 0) {
+            win.first_timed_present_start_ns = null;
+        }
+        win.present_timing_diagnostics.outstanding_timed_presents = win.outstanding_timed_presents;
+        return err;
+    };
+    win.present_timing_diagnostics.notePollResult(completed);
+    self.notePresentTimingProgress(win, completed);
+    win.present_timing_diagnostics.outstanding_timed_presents = win.outstanding_timed_presents;
+    return completed;
+}
+
+fn pollPresentFeedbackGoogle(self: *VkBackend, win: *Window, out: []PresentFeedback) !usize {
+    var available: u32 = 0;
+    const probe_result = self.device.getPastPresentationTimingGOOGLE(
+        win.swapchain,
+        &available,
+        null,
+    ) catch |err| {
+        win.present_timing_diagnostics.noteGoogleProbe(.failed, 0);
+        return err;
+    };
+    win.present_timing_diagnostics.noteGoogleProbe(
+        presentTimingCallResult(probe_result),
+        available,
+    );
+    if (available == 0) {
+        if (win.outstanding_timed_presents != 0) {
+            win.present_timing_diagnostics.google_empty_probe_polls +|= 1;
+            const now_ns = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+            const first_pending_start_ns = if (win.first_timed_present_start_ns) |start|
+                start.nanoseconds
+            else
+                null;
+            win.present_timing_diagnostics.watchdog_last_now_ns = now_ns;
+            win.present_timing_diagnostics.watchdog_elapsed_ns =
+                if (first_pending_start_ns) |start| if (now_ns >= start) now_ns - start else 0 else 0;
+            if (presentTimingWatchdogDecision(
+                win.outstanding_timed_presents,
+                first_pending_start_ns,
+                now_ns,
+            ) == .disable) {
+                abandonPresentTiming(win, self.has_google_present_timing);
+                win.present_timing_diagnostics.notePollResult(0);
+                return error.PresentTimingDataUnavailable;
+            }
+        } else {
+            win.first_timed_present_start_ns = null;
+            win.present_timing_diagnostics.google_empty_probe_polls = 0;
+        }
+        win.present_timing_diagnostics.notePollResult(0);
+        return 0;
+    }
+    win.present_timing_diagnostics.google_empty_probe_polls = 0;
+    try validatePresentFeedbackBatch(win.outstanding_timed_presents, available, out.len);
+    const available_len: usize = @intCast(available);
+    var retrieved = available;
+    const retrieve_result = self.device.getPastPresentationTimingGOOGLE(
+        win.swapchain,
+        &retrieved,
+        @ptrCast(win.present_scratch.google_records[0..available_len].ptr),
+    ) catch |err| {
+        win.present_timing_diagnostics.noteGoogleRetrieve(.failed, 0);
+        return err;
+    };
+    win.present_timing_diagnostics.noteGoogleRetrieve(
+        presentTimingCallResult(retrieve_result),
+        retrieved,
+    );
+    if (retrieved > available) return error.PresentFeedbackBackendError;
+    const retrieved_len: usize = @intCast(retrieved);
+    for (
+        win.present_scratch.google_records[0..retrieved_len],
+        win.present_scratch.records[0..retrieved_len],
+    ) |record, *normalized| {
+        win.present_timing_diagnostics.noteGoogleRecord(
+            record.present_id,
+            record.actual_present_time,
+        );
+        normalized.* = .{
+            .present_id = record.present_id,
+            .actual_present_ns = record.actual_present_time,
+            .completed = true,
+        };
+    }
+    const completed = commitPresentFeedbackBatch(
+        .google,
+        &win.last_feedback_id,
+        &win.outstanding_timed_presents,
+        win.present_scratch.records[0..retrieved_len],
+        win.present_scratch.normalized[0..retrieved_len],
+        out,
+    ) catch |err| {
+        if (err == error.PresentTimingDataUnavailable) {
+            abandonPresentTiming(win, self.has_google_present_timing);
+        }
+        if (win.outstanding_timed_presents == 0) {
+            win.first_timed_present_start_ns = null;
+        }
+        win.present_timing_diagnostics.outstanding_timed_presents = win.outstanding_timed_presents;
+        return err;
+    };
+    win.present_timing_diagnostics.notePollResult(completed);
+    self.notePresentTimingProgress(win, completed);
+    win.present_timing_diagnostics.outstanding_timed_presents = win.outstanding_timed_presents;
+    return completed;
+}
+
+fn presentStageTimestamp(record: vk.PastPresentationTimingEXT) u64 {
+    var first_pixel_out_ns: u64 = 0;
+    const stage_count = @min(record.present_stage_count, 1);
+    for (record.p_present_stages[0..stage_count]) |stage| {
+        if (stage.stage.image_first_pixel_visible_bit_ext and stage.time != 0) return stage.time;
+        if (stage.stage.image_first_pixel_out_bit_ext and stage.time != 0) first_pixel_out_ns = stage.time;
+    }
+    return first_pixel_out_ns;
+}
+
+pub fn cmdTimestampReset(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    handle: TimestampQueryHandle,
+    first: u32,
+    count: u32,
+) !void {
+    if (!self.timestamp_queries) return error.TimestampQueriesUnsupported;
+    const entry = try self.timestampQueryEntry(handle);
+    try TimestampQuerySet.validateQueryRange(entry.count, first, count);
+    self.device.cmdResetQueryPool(cmd, entry.pool, first, count);
+}
+
+pub fn cmdTimestampWrite(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    handle: TimestampQueryHandle,
+    index: u32,
+    stage: TimestampQuerySet.TimestampStage,
+) !void {
+    if (!self.timestamp_queries) return error.TimestampQueriesUnsupported;
+    const entry = try self.timestampQueryEntry(handle);
+    try TimestampQuerySet.validateQueryRange(entry.count, index, 1);
+    const pipeline_stage: vk.PipelineStageFlags = switch (stage) {
+        .all_commands_start => .{ .top_of_pipe_bit = true },
+        .all_commands_end => .{ .bottom_of_pipe_bit = true },
+    };
+    self.device.cmdWriteTimestamp(cmd, pipeline_stage, entry.pool, index);
+}
+
+// Timestamp query methods follow queue synchronization methods.
 
 pub fn shaderCreate(self: *VkBackend, spv: []const u32, stage: u2, entry: [:0]const u8) !ShaderHandle {
     const vk_stage: vk.ShaderStageFlags = switch (stage) {
@@ -1327,8 +2637,12 @@ pub fn shaderCreate(self: *VkBackend, spv: []const u32, stage: u2, entry: [:0]co
     );
     {
         var name_buf: [64]u8 = undefined;
-        const stage_name = switch (stage) { 0 => "vert", 1 => "frag", else => "comp" };
-        const sname = std.fmt.bufPrintZ(&name_buf, "shader_{s}_{s}", .{ stage_name, entry }) catch "shader";
+        const stage_name = switch (stage) {
+            0 => "vert",
+            1 => "frag",
+            else => "comp",
+        };
+        const sname = std.fmt.bufPrintSentinel(&name_buf, "shader_{s}_{s}", .{ stage_name, entry }, 0) catch "shader";
         self.setDebugName(.shader_ext, @intFromEnum(shader_out[0]), sname);
     }
     return shader_out[0];
@@ -1584,7 +2898,15 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
 
     var color_attach: [8]vk.RenderingAttachmentInfo = undefined;
     // Zero out inactive entries so the validation layer doesn't see garbage image_views
-    for (&color_attach) |*ca| ca.* = .{ .image_view = .null_handle, .image_layout = .undefined, .resolve_mode = .{}, .resolve_image_layout = .undefined, .load_op = .dont_care, .store_op = .dont_care, .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } } };
+    for (&color_attach) |*ca| ca.* = .{
+        .image_view = .null_handle,
+        .image_layout = .undefined,
+        .resolve_mode = .{},
+        .resolve_image_layout = .undefined,
+        .load_op = .dont_care,
+        .store_op = .dont_care,
+        .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
+    };
     const color_count: u32 = @intCast(desc.color_attachments.len);
     if (color_count > 8) {
         log.warn("cmdBeginRendering: color_attachment count {} exceeds max 8, clamping", .{color_count});
@@ -1766,6 +3088,208 @@ pub fn cmdEndRendering(self: *VkBackend, cmd: CommandBufferHandle) void {
     }
 }
 
+// ── Tracy GPU zones (Vulkan timestamp queries) ─────────────
+const CmdOwner = struct {
+    win: *Window,
+    frame: u32,
+};
+
+/// Find the window + frame owning a command buffer handle.
+/// Returns null for offscreen/compute command buffers; those are silently skipped.
+fn findCmdOwner(self: *VkBackend, cmd: CommandBufferHandle) ?CmdOwner {
+    for (self.windows.items) |*win| {
+        for (win.cmd_buffers.items, 0..) |cb, f| {
+            if (cb.handle == cmd) return .{ .win = win, .frame = @intCast(f) };
+        }
+    }
+    return null;
+}
+
+/// Calibrate the device timestamp clock against the CPU clock for Tracy.
+/// Mirrors TracyVulkan.hpp: probe 32 samples and take the minimum driver-reported
+/// deviation, then retry until the deviation is at most 1.5× that minimum.
+/// A single blind sample can be off by the full deviation (µs..ms) if the GPU is
+/// busy at init, which would misplace every GPU zone on the CPU timeline.
+/// Returns false only on driver failure; on retry exhaustion the last sample wins.
+fn calibrateGpuTimestamps(
+    self: *VkBackend,
+    info: []const vk.CalibratedTimestampInfoKHR,
+    out: *[2]u64,
+) bool {
+    var min_dev: u64 = std.math.maxInt(u64);
+    var ts: [2]u64 = undefined;
+    for (0..32) |_| {
+        const dev = self.device.getCalibratedTimestampsKHR(info, &ts) catch return false;
+        if (dev < min_dev) {
+            min_dev = dev;
+            out.* = ts;
+        }
+    }
+    const threshold = min_dev * 3 / 2;
+    for (0..64) |_| {
+        const dev = self.device.getCalibratedTimestampsKHR(info, &ts) catch return false;
+        out.* = ts;
+        if (dev <= threshold) return true;
+    }
+    return true;
+}
+
+/// Source-location id for a swapchain image's per-frame GPU zone.
+/// Called every frame from beginFrameGpuZone, but registers lazily: allocSrclocName
+/// runs only on first use per image index (and again only if the swapchain grows
+/// more images on recreation). Allocated srclocs are never freed by the profiler,
+/// so the leak is bounded by the image count, not the frame count.
+fn tracyImgSrcloc(self: *VkBackend, win: *Window, image_index: u32) ?u64 {
+    const idx: usize = @intCast(image_index);
+    if (win.tracy_img_srclocs.items.len <= idx) {
+        const old_len = win.tracy_img_srclocs.items.len;
+        win.tracy_img_srclocs.resize(self.allocator, idx + 1) catch return null;
+        @memset(win.tracy_img_srclocs.items[old_len..], 0);
+    }
+    if (win.tracy_img_srclocs.items[idx] == 0) {
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "img {d}", .{image_index}) catch "img";
+        win.tracy_img_srclocs.items[idx] = tracy.allocSrclocName(
+            @src(),
+            name,
+            .{ .r = 105, .g = 105, .b = 105, .a = 255 }, // dim gray
+        );
+    }
+    const id = win.tracy_img_srclocs.items[idx];
+    return if (id == 0) null else id;
+}
+
+/// Begin the per-frame GPU zone named by swapchain image index. Each image is
+/// in flight at most once, so the name identifies the in-flight frame.
+fn beginFrameGpuZone(self: *VkBackend, win: *Window, frame: u32, image_index: u32) void {
+    if (win.tracy_queries.items[frame] >= TracyQueryId.cap) return;
+    const srcloc = self.tracyImgSrcloc(win, image_index) orelse return;
+    const id = win.tracy_queries.items[frame];
+    win.tracy_queries.items[frame] += 1;
+    const query_id: TracyQueryId = .{ .index = @intCast(id), .frame = @intCast(frame) };
+    self.tracy_queue.?.beginZoneAlloc(.{ .srcloc = srcloc, .query_id = @bitCast(query_id) });
+    self.device.cmdWriteTimestamp(
+        win.cmd_buffers.items[frame].handle,
+        .{ .bottom_of_pipe_bit = true },
+        win.tracy_query_pools.items[frame],
+        query_id.index,
+    );
+}
+
+/// End the per-frame GPU zone.
+fn endFrameGpuZone(self: *VkBackend, win: *Window, frame: u32) void {
+    if (win.tracy_queries.items[frame] >= TracyQueryId.cap) return;
+    const id = win.tracy_queries.items[frame];
+    win.tracy_queries.items[frame] += 1;
+    const query_id: TracyQueryId = .{ .index = @intCast(id), .frame = @intCast(frame) };
+    self.device.cmdWriteTimestamp(
+        win.cmd_buffers.items[frame].handle,
+        .{ .bottom_of_pipe_bit = true },
+        win.tracy_query_pools.items[frame],
+        query_id.index,
+    );
+    self.tracy_queue.?.endZone(@bitCast(query_id));
+}
+
+pub fn cmdBufBeginZone(self: *VkBackend, cmd: CommandBufferHandle, loc: *const tracy.SourceLocation) void {
+    if (!self.tracy_gpu_zones) return;
+    const owner = findCmdOwner(self, cmd) orelse return;
+    const win = owner.win;
+    const frame = owner.frame;
+    if (win.tracy_queries.items[frame] >= TracyQueryId.cap) @panic("out of tracy gpu queries");
+    const id = win.tracy_queries.items[frame];
+    win.tracy_queries.items[frame] += 1;
+    const query_id: TracyQueryId = .{ .index = @intCast(id), .frame = @intCast(frame) };
+    self.tracy_queue.?.beginZone(.{ .query_id = @bitCast(query_id), .loc = loc });
+    self.device.cmdWriteTimestamp(
+        cmd,
+        .{ .bottom_of_pipe_bit = true },
+        win.tracy_query_pools.items[frame],
+        query_id.index,
+    );
+    if (self.enable_debug_utils) self.cmdBeginDebugLabel(cmd, std.mem.span(loc.name orelse loc.function), .{
+        @as(f32, @floatFromInt(loc.color.r)) / 255.0,
+        @as(f32, @floatFromInt(loc.color.g)) / 255.0,
+        @as(f32, @floatFromInt(loc.color.b)) / 255.0,
+        1.0,
+    });
+}
+
+pub fn cmdBufEndZone(self: *VkBackend, cmd: CommandBufferHandle) void {
+    if (!self.tracy_gpu_zones) return;
+    const owner = findCmdOwner(self, cmd) orelse return;
+    const win = owner.win;
+    const frame = owner.frame;
+    if (win.tracy_queries.items[frame] >= TracyQueryId.cap) @panic("out of tracy gpu queries");
+    const id = win.tracy_queries.items[frame];
+    win.tracy_queries.items[frame] += 1;
+    const query_id: TracyQueryId = .{ .index = @intCast(id), .frame = @intCast(frame) };
+    self.device.cmdWriteTimestamp(
+        cmd,
+        .{ .bottom_of_pipe_bit = true },
+        win.tracy_query_pools.items[frame],
+        query_id.index,
+    );
+    self.tracy_queue.?.endZone(@bitCast(query_id));
+    if (self.enable_debug_utils) self.cmdEndDebugLabel(cmd);
+}
+
+/// Read back completed timestamp queries and feed them to the Tracy GPU queue.
+/// Called from beginFrame once the previous frame's fence has signaled.
+fn collectTracyGpuQueries(self: *VkBackend, win: *Window, frame: u32) !void {
+    const queries = win.tracy_queries.items[frame];
+    if (queries == 0) return;
+    const results = try self.allocator.alloc(u64, @as(usize, queries) * 2);
+    defer self.allocator.free(results);
+    const result = self.device.getQueryPoolResults(
+        win.tracy_query_pools.items[frame],
+        0,
+        queries,
+        results.len * @sizeOf(u64),
+        @ptrCast(results.ptr),
+        @sizeOf(u64) * 2,
+        .{ .@"64_bit" = true, .with_availability_bit = true },
+    ) catch |err| {
+        log.warn("collectTracyGpuQueries: getQueryPoolResults failed: {}", .{err});
+        self.device.resetQueryPool(win.tracy_query_pools.items[frame], 0, TracyQueryId.cap);
+        win.tracy_queries.items[frame] = 0;
+        return;
+    };
+    switch (result) {
+        // Unsubmitted command buffers leave their queries never-written; skip via availability bit.
+        .success, .not_ready => {},
+        else => {
+            log.warn("collectTracyGpuQueries: getQueryPoolResults returned {}", .{result});
+            self.device.resetQueryPool(win.tracy_query_pools.items[frame], 0, TracyQueryId.cap);
+            win.tracy_queries.items[frame] = 0;
+            return;
+        },
+    }
+    for (0..queries) |i| {
+        if (results[i * 2 + 1] != 0) {
+            self.tracy_queue.?.emitTime(.{
+                .query_id = @bitCast(TracyQueryId{ .index = @intCast(i), .frame = @intCast(frame) }),
+                .gpu_time = results[i * 2],
+            });
+        }
+    }
+    // Re-anchor the GPU↔CPU timeline every frame: fresh calibrated pair;
+    // cpuDelta = CPU-clock advance since the last calibration. The server
+    // recomputes calibrationMod from it, compensating GPU clock drift.
+    var calib: [2]u64 = undefined;
+    if (self.device.getCalibratedTimestampsKHR(&tracy_calib_info, &calib)) |_| {
+        const delta: i64 = @as(i64, @intCast(calib[0])) - @as(i64, @intCast(self.tracy_prev_calib_cpu));
+        if (delta > 0) {
+            self.tracy_prev_calib_cpu = calib[0];
+            self.tracy_queue.?.calibrate(.{ .gpu_time = calib[1], .cpu_delta = delta });
+        }
+    } else |err| {
+        log.warn("collectTracyGpuQueries: re-calibration failed: {}", .{err});
+    }
+    self.device.resetQueryPool(win.tracy_query_pools.items[frame], 0, TracyQueryId.cap);
+    win.tracy_queries.items[frame] = 0;
+}
+
 pub fn cmdBeginDebugLabel(self: *VkBackend, cmd: CommandBufferHandle, name: [:0]const u8, color: [4]f32) void {
     if (!self.enable_debug_utils) return;
     if (self.debug_messenger == .null_handle) return;
@@ -1785,7 +3309,7 @@ pub fn cmdEndDebugLabel(self: *VkBackend, cmd: CommandBufferHandle) void {
 pub fn cmdInsertDebugLabel(self: *VkBackend, cmd: CommandBufferHandle, name: [:0]const u8, color: [4]f32) void {
     if (!self.enable_debug_utils) return;
     if (self.debug_messenger == .null_handle) return;
-    const label = vk.DebugUtilsLabelEXT{ .p_label_name = name, .color = color };
+    const label: vk.DebugUtilsLabelEXT = .{ .p_label_name = name, .color = color };
     self.device.cmdInsertDebugUtilsLabelEXT(cmd, &label);
 }
 
@@ -1793,13 +3317,14 @@ pub fn cmdInsertDebugLabel(self: *VkBackend, cmd: CommandBufferHandle, name: [:0
 pub fn setDebugName(self: *VkBackend, object_type: vk.ObjectType, handle: u64, name: [:0]const u8) void {
     if (!self.enable_debug_utils) return;
     if (self.debug_messenger == .null_handle) return;
-    const info = vk.DebugUtilsObjectNameInfoEXT{
+    const info: vk.DebugUtilsObjectNameInfoEXT = .{
         .object_type = object_type,
         .object_handle = handle,
         .p_object_name = name,
     };
-    self.device.setDebugUtilsObjectNameEXT(&info) catch {
+    self.device.setDebugUtilsObjectNameEXT(&info) catch |err| {
         // Silently ignore if the extension is not available
+        log.debug("setDebugUtilsObjectNameEXT failed: {}", .{err});
     };
 }
 
@@ -1830,6 +3355,15 @@ pub fn cmdBindDescriptorSets(self: *VkBackend, cmd: CommandBufferHandle, heap: u
 
 pub fn deviceLimits(self: *const VkBackend) DeviceLimits {
     return self.device_limits;
+}
+
+pub fn deviceIdentity(self: *const VkBackend) DeviceIdentity {
+    return .{
+        .name = self.selected_device_name[0..self.selected_device_name_len],
+        .vendor_id = self.selected_vendor_id,
+        .device_id = self.selected_device_id,
+        .driver = self.selected_driver_name[0..self.selected_driver_name_len],
+    };
 }
 pub fn surfaceSize(self: *const VkBackend, window_index: u32) Extent2D {
     if (window_index < self.windows.items.len) return self.windows.items[window_index].extent;
@@ -1894,6 +3428,46 @@ fn recreateSwapchain(self: *VkBackend, win: *Window) !void {
     log.info("Swapchain recreated after resize", .{});
 }
 
+fn querySwapchainTimeDomain(self: *VkBackend, win: *Window) !void {
+    var properties: vk.SwapchainTimeDomainPropertiesEXT = .{
+        .time_domain_count = 0,
+        .p_time_domains = null,
+        .p_time_domain_ids = null,
+    };
+    _ = try self.device.getSwapchainTimeDomainPropertiesEXT(win.swapchain, &properties, null);
+    if (properties.time_domain_count == 0) return error.NoPresentTimeDomain;
+
+    var domains: [8]vk.TimeDomainKHR = undefined;
+    var ids: [8]u64 = undefined;
+    if (properties.time_domain_count > domains.len) return error.TooManyPresentTimeDomains;
+    properties.p_time_domains = @ptrCast(&domains);
+    properties.p_time_domain_ids = @ptrCast(&ids);
+    _ = try self.device.getSwapchainTimeDomainPropertiesEXT(win.swapchain, &properties, null);
+    if (properties.time_domain_count == 0) return error.NoPresentTimeDomain;
+    if (properties.time_domain_count > domains.len) return error.TooManyPresentTimeDomains;
+
+    win.present_time_domain_count = properties.time_domain_count;
+    @memcpy(
+        win.present_time_domains[0..properties.time_domain_count],
+        domains[0..properties.time_domain_count],
+    );
+    @memcpy(
+        win.present_time_domain_ids[0..properties.time_domain_count],
+        ids[0..properties.time_domain_count],
+    );
+
+    var selected: usize = 0;
+    for (domains[0..properties.time_domain_count], 0..) |domain, i| {
+        if (domain == .clock_monotonic_raw_khr) {
+            selected = i;
+            break;
+        }
+        if (domain == .clock_monotonic_khr) selected = i;
+    }
+    win.time_domain_id = ids[selected];
+    win.time_domain_valid = true;
+}
+
 fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
@@ -1917,17 +3491,25 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     }
     win.extent = .{ .width = extent.width, .height = extent.height }; // actual extent
 
-    // Surface formats
+    // Surface formats, preferred order: b8g8r8a8_srgb/srgb_nonlinear ->
+    // r8g8b8a8_srgb/srgb_nonlinear -> b8g8r8a8_unorm/srgb_nonlinear -> first entry.
     const formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.physical_device, win.surface, alloc);
     defer alloc.free(formats);
+    if (formats.len == 0) return error.OutOfDateKHR;
+    const preferences = [_]vk.SurfaceFormatKHR{
+        .{ .format = .b8g8r8a8_srgb, .color_space = .srgb_nonlinear_khr },
+        .{ .format = .r8g8b8a8_srgb, .color_space = .srgb_nonlinear_khr },
+        .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
+    };
     var chosen_format: vk.SurfaceFormatKHR = formats[0];
-    for (formats) |f| {
-        if (f.format == .b8g8r8a8_srgb and f.color_space == .srgb_nonlinear_khr) {
-            chosen_format = f;
-            break;
+    outer: for (preferences) |want| {
+        for (formats) |f| {
+            if (f.format == want.format and f.color_space == want.color_space) {
+                chosen_format = f;
+                break :outer;
+            }
         }
     }
-    win.swapchain_format = chosen_format.format;
 
     // Present modes
     const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(
@@ -1937,12 +3519,37 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     );
     defer alloc.free(present_modes);
     var chosen_present = vk.PresentModeKHR.fifo_khr;
-    for (present_modes) |pm| {
-        if (pm == .mailbox_khr) {
-            chosen_present = pm;
+    var requested_supported = false;
+    for (present_modes) |mode| {
+        if (mode == win.present_mode) {
+            chosen_present = mode;
+            requested_supported = true;
             break;
         }
     }
+    if (!requested_supported) {
+        const fallback_modes: []const vk.PresentModeKHR = switch (win.present_mode) {
+            .immediate_khr => &.{ .mailbox_khr, .fifo_relaxed_khr, .fifo_khr },
+            .mailbox_khr => &.{ .fifo_relaxed_khr, .fifo_khr },
+            .fifo_relaxed_khr => &.{.fifo_khr},
+            .fifo_khr => &.{.fifo_khr},
+            else => &.{.fifo_khr},
+        };
+        for (fallback_modes) |fallback| {
+            for (present_modes) |mode| {
+                if (mode == fallback) {
+                    chosen_present = mode;
+                    break;
+                }
+            }
+            if (chosen_present == fallback) break;
+        }
+        log.warn(
+            "Requested present mode {} unavailable; using {}",
+            .{ win.present_mode, chosen_present },
+        );
+    }
+    log.info("Present mode: {} ({} modes supported)", .{ chosen_present, present_modes.len });
 
     // Hand the surface to the device for swapchain maintenance
     const swapchain_ci: vk.SwapchainCreateInfoKHR = .{
@@ -1957,12 +3564,38 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
         .pre_transform = caps.current_transform,
         .composite_alpha = .{ .opaque_bit_khr = true },
         .present_mode = chosen_present,
+        // Present timing requires the swapchain created with both feature flags.
+        .flags = if (win.timing_mode == .ext)
+            .{ .present_id_2_bit_khr = true, .present_timing_bit_ext = true }
+        else
+            .{},
         .clipped = .true,
         .old_swapchain = old_swapchain,
     };
     win.swapchain = try self.device.createSwapchainKHR(&swapchain_ci, null);
     self.setDebugName(.swapchain_khr, @intFromEnum(win.swapchain), "swapchain");
-
+    if (win.timing_mode == .ext) {
+        // Queue capacity is part of EXT support. Do not advertise EXT after
+        // silently discarding a failed setup call.
+        _ = try self.device.setSwapchainPresentTimingQueueSizeEXT(win.swapchain, max_present_feedback);
+        if (self.querySwapchainTimeDomain(win)) |_| {
+            win.timing_mode = resolvePresentTimingMode(
+                self.has_ext_present_timing,
+                .{
+                    .present_id2 = true,
+                    .present_timing = true,
+                    .stage = selectPresentStage(win.present_stage_queries),
+                    .time_domain_id = win.time_domain_id,
+                    .time_domain_valid = win.time_domain_valid,
+                },
+                self.has_google_present_timing,
+            );
+        } else |err| {
+            log.warn("swapchain time-domain query failed; downgrading timing: {}", .{err});
+            win.time_domain_valid = false;
+            win.timing_mode = if (self.has_google_present_timing) .google else .unsupported;
+        }
+    }
     if (old_swapchain != .null_handle) {
         for (win.views.items) |v| self.device.destroyImageView(v, null);
         win.views.clearRetainingCapacity();
@@ -1984,7 +3617,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     {
         var name_buf: [64]u8 = undefined;
         for (win.images.items, 0..) |img, i| {
-            const name = std.fmt.bufPrintZ(&name_buf, "swapchain_img[{}]", .{i}) catch "swapchain_img";
+            const name = std.fmt.bufPrintSentinel(&name_buf, "swapchain_img[{}]", .{i}, 0) catch "swapchain_img";
             self.setDebugName(.image, @intFromEnum(img), name);
         }
     }
@@ -2010,7 +3643,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
                     .layer_count = 1,
                 },
             }, null);
-            const vname = std.fmt.bufPrintZ(&name_buf, "swapchain_view[{}]", .{i}) catch "swapchain_view";
+            const vname = std.fmt.bufPrintSentinel(&name_buf, "swapchain_view[{}]", .{i}, 0) catch "swapchain_view";
             self.setDebugName(.image_view, @intFromEnum(view), vname);
             new_views.appendAssumeCapacity(view);
         }
@@ -2018,6 +3651,18 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     // Swap atomically: deinit old, take new
     win.views.deinit(alloc);
     win.views = new_views;
+    // A new swapchain owns a fresh bounded timing queue.
+    win.outstanding_timed_presents = 0;
+    win.first_timed_present_start_ns = null;
+    const swapchain_generation = win.present_timing_diagnostics.swapchain_generation + 1;
+    win.present_timing_diagnostics = .{
+        .mode = win.timing_mode,
+        .swapchain_id = @intFromEnum(win.swapchain),
+        .swapchain_generation = swapchain_generation,
+        .present_stage_bits = @bitCast(win.present_stage_queries),
+        .time_domain_id = win.time_domain_id,
+        .time_domain_valid = win.time_domain_valid,
+    };
     log.info("Swapchain created: {} images, format {}, extent {}x{}", .{
         swap_images.len, win.swapchain_format, extent.width, extent.height,
     });
@@ -2037,7 +3682,7 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
         }, null);
         {
             var name_buf: [64]u8 = undefined;
-            const pname = std.fmt.bufPrintZ(&name_buf, "cmd_pool[{}]", .{f}) catch "cmd_pool";
+            const pname = std.fmt.bufPrintSentinel(&name_buf, "cmd_pool[{}]", .{f}, 0) catch "cmd_pool";
             self.setDebugName(.command_pool, @intFromEnum(pool), pname);
         }
         win.cmd_pools.appendAssumeCapacity(pool);
@@ -2050,7 +3695,7 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
         }, @ptrCast(&cb_handle));
         {
             var name_buf: [64]u8 = undefined;
-            const cname = std.fmt.bufPrintZ(&name_buf, "cmd_buf[{}]", .{f}) catch "cmd_buf";
+            const cname = std.fmt.bufPrintSentinel(&name_buf, "cmd_buf[{}]", .{f}, 0) catch "cmd_buf";
             self.setDebugName(.command_buffer, @intFromEnum(cb_handle), cname);
         }
         win.cmd_buffers.appendAssumeCapacity(.{ .handle = cb_handle, .wrapper = &self.vkd });
@@ -2058,10 +3703,24 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
         const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
         {
             var name_buf: [64]u8 = undefined;
-            const fname = std.fmt.bufPrintZ(&name_buf, "cmd_fence[{}]", .{f}) catch "cmd_fence";
+            const fname = std.fmt.bufPrintSentinel(&name_buf, "cmd_fence[{}]", .{f}, 0) catch "cmd_fence";
             self.setDebugName(.fence, @intFromEnum(fence), fname);
         }
         win.cmd_pool_ready.appendAssumeCapacity(fence);
+    }
+    // Tracy GPU query pools: one per frame, host-reset (host_query_reset feature).
+    if (self.tracy_gpu_zones) {
+        try win.tracy_query_pools.ensureTotalCapacity(alloc, frames);
+        try win.tracy_queries.ensureTotalCapacity(alloc, frames);
+        for (0..frames) |_| {
+            const pool = try self.device.createQueryPool(&.{
+                .query_type = .timestamp,
+                .query_count = TracyQueryId.cap,
+            }, null);
+            self.device.resetQueryPool(pool, 0, TracyQueryId.cap);
+            win.tracy_query_pools.appendAssumeCapacity(pool);
+            win.tracy_queries.appendAssumeCapacity(0);
+        }
     }
     log.info("Per-frame resources created: {} frames", .{frames});
 }
@@ -2088,7 +3747,7 @@ fn createPresentSemaphores(self: *VkBackend, win: *Window) !void {
         var name_buf: [64]u8 = undefined;
         for (win.images.items, 0..) |_, i| {
             const sem = try self.device.createSemaphore(&.{}, null);
-            const sname = std.fmt.bufPrintZ(&name_buf, "present_sem[{}]", .{i}) catch "present_sem";
+            const sname = std.fmt.bufPrintSentinel(&name_buf, "present_sem[{}]", .{i}, 0) catch "present_sem";
             self.setDebugName(.semaphore, @intFromEnum(sem), sname);
             win.present_sems.appendAssumeCapacity(sem);
         }
@@ -2122,6 +3781,12 @@ fn destroyWindow(self: *VkBackend, win: *Window) void {
     win.cmd_buffers.deinit(alloc);
     for (win.cmd_pool_ready.items) |f| self.device.destroyFence(f, null);
     win.cmd_pool_ready.deinit(alloc);
+    if (self.tracy_gpu_zones) {
+        for (win.tracy_query_pools.items) |p| self.device.destroyQueryPool(p, null);
+        win.tracy_query_pools.deinit(alloc);
+        win.tracy_queries.deinit(alloc);
+        win.tracy_img_srclocs.deinit(alloc);
+    }
     if (use_swapchain_maintenance1) {
         for (win.present_done_fences.items) |f| self.device.destroyFence(f, null);
         win.present_done_fences.deinit(alloc);
@@ -2291,7 +3956,12 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
     errdefer self.device.destroyImage(image, null);
     {
         var name_buf: [64]u8 = undefined;
-        const iname = std.fmt.bufPrintZ(&name_buf, "tex_img[{}]", .{self.textures.items.len + 1}) catch "tex_img";
+        const iname = std.fmt.bufPrintSentinel(
+            &name_buf,
+            "tex_img[{}]",
+            .{self.textures.items.len + 1},
+            0,
+        ) catch "tex_img";
         self.setDebugName(.image, @intFromEnum(image), iname);
     }
 
@@ -2389,7 +4059,12 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
     errdefer self.device.destroyImageView(default_view, null);
     {
         var name_buf: [64]u8 = undefined;
-        const vname = std.fmt.bufPrintZ(&name_buf, "tex_view[{}]", .{self.textures.items.len + 1}) catch "tex_view";
+        const vname = std.fmt.bufPrintSentinel(
+            &name_buf,
+            "tex_view[{}]",
+            .{self.textures.items.len + 1},
+            0,
+        ) catch "tex_view";
         self.setDebugName(.image_view, @intFromEnum(default_view), vname);
     }
 
@@ -2600,14 +4275,14 @@ pub fn descHeapCreate(self: *VkBackend, texture_count: u32, texture_rw_count: u3
         .p_set_layouts = @ptrCast(&self.desc_layouts),
     }, &sets);
 
-    const idx = @as(u32, @intCast(self.desc_heaps.items.len));
+    const idx: u32 = @intCast(self.desc_heaps.items.len);
     {
         var name_buf: [64]u8 = undefined;
-        const pname = std.fmt.bufPrintZ(&name_buf, "desc_pool[{}]", .{idx}) catch "desc_pool";
+        const pname = std.fmt.bufPrintSentinel(&name_buf, "desc_pool[{}]", .{idx}, 0) catch "desc_pool";
         self.setDebugName(.descriptor_pool, @intFromEnum(pool), pname);
         const set_labels = [_][]const u8{ "tex", "tex_rw", "samp" };
         for (&sets, set_labels) |*s, label| {
-            const sn = std.fmt.bufPrintZ(&name_buf, "desc_set_{s}[{}]", .{ label, idx }) catch "desc_set";
+            const sn = std.fmt.bufPrintSentinel(&name_buf, "desc_set_{s}[{}]", .{ label, idx }, 0) catch "desc_set";
             self.setDebugName(.descriptor_set, @intFromEnum(s.*), sn);
         }
     }
@@ -2887,8 +4562,17 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
     errdefer self.device.destroyBuffer(buf, null);
     {
         var name_buf: [64]u8 = undefined;
-        const mem_label = switch (mem_type) { .gpu => "gpu", .default => "host", .readback => "read" };
-        const bname = std.fmt.bufPrintZ(&name_buf, "buf_{s}[{}]", .{ mem_label, self.allocs.items.len }) catch "buf";
+        const mem_label = switch (mem_type) {
+            .gpu => "gpu",
+            .default => "host",
+            .readback => "read",
+        };
+        const bname = std.fmt.bufPrintSentinel(
+            &name_buf,
+            "buf_{s}[{}]",
+            .{ mem_label, self.allocs.items.len },
+            0,
+        ) catch "buf";
         self.setDebugName(.buffer, @intFromEnum(buf), bname);
     }
 
@@ -3023,4 +4707,668 @@ fn findMemoryType(self: *VkBackend, type_bits: u32, properties: vk.MemoryPropert
             mt.property_flags.contains(properties)) return @intCast(i);
     }
     return null;
+}
+
+/// Validate an application present ID against the active timing extension.
+/// Zero and non-monotonic IDs are invalid; the Google fallback is u32-bounded.
+fn validatePresentTimingId(mode: PresentTimingMode, last_id: u64, timing_id: u64) !void {
+    if (mode == .unsupported) return error.PresentTimingUnsupported;
+    if (timing_id == 0) return error.InvalidPresentTimingId;
+    if (timing_id <= last_id) return error.InvalidPresentTimingId;
+    if (mode == .google and timing_id > std.math.maxInt(u32)) return error.PresentTimingIdOutOfRange;
+}
+fn validatePresentTimingRequest(
+    mode: PresentTimingMode,
+    last_id: u64,
+    timing_id: u64,
+    outstanding: u32,
+    capacity: u32,
+) !void {
+    try validatePresentTimingId(mode, last_id, timing_id);
+    if (outstanding >= capacity) return error.PresentTimingQueueFull;
+}
+
+/// Validate the driver count before retrieval. The count must fit both the
+/// fixed scratch storage and the timed presents still owned by this surface.
+fn validatePresentFeedbackBatch(
+    outstanding: u32,
+    available: u32,
+    out_len: usize,
+) !void {
+    if (available > max_present_feedback or available > outstanding)
+        return error.PresentFeedbackBackendError;
+    if (available > out_len) return error.OutputTooSmall;
+}
+
+fn presentTimingBatchHasCompleteZero(records: []const PresentRecord) bool {
+    for (records) |record| {
+        if (record.completed and record.actual_present_ns == 0) return true;
+    }
+    return false;
+}
+
+/// A successful driver retrieval consumes every returned record, including
+/// records that later normalize as incomplete or invalid.
+fn commitPresentFeedbackBatch(
+    mode: PresentTimingMode,
+    last_completed_id: *u64,
+    outstanding: *u32,
+    records: []const PresentRecord,
+    normalized: []PresentFeedback,
+    out: []PresentFeedback,
+) !usize {
+    if (records.len > max_present_feedback or records.len > outstanding.*)
+        return error.PresentFeedbackBackendError;
+    if (records.len > out.len) return error.OutputTooSmall;
+    outstanding.* -= @intCast(records.len);
+    if (presentTimingBatchHasCompleteZero(records))
+        return error.PresentTimingDataUnavailable;
+    return normalizePresentFeedback(mode, last_completed_id, records, normalized, out);
+}
+
+/// Normalize injected backend presentation records into sorted completed
+/// feedback. Pure function so tests stay deterministic; the real poll feeds it
+/// driver records. Nothing is consumed or mutated on failure.
+fn normalizePresentFeedback(
+    mode: PresentTimingMode,
+    last_completed_id: *u64,
+    records: []const PresentRecord,
+    normalized: []PresentFeedback,
+    out: []PresentFeedback,
+) !usize {
+    if (records.len > normalized.len) return error.OutputTooSmall;
+    var completed_count: usize = 0;
+    for (records) |record| {
+        if (!record.completed or record.actual_present_ns == 0) continue;
+        completed_count += 1;
+    }
+    // Reject before consuming anything so no feedback is ever dropped.
+    if (completed_count > out.len) return error.OutputTooSmall;
+
+    var index: usize = 0;
+
+    for (records) |record| {
+        if (!record.completed or record.actual_present_ns == 0) continue;
+        try validatePresentTimingId(mode, last_completed_id.*, record.present_id);
+        normalized[index] = .{
+            .present_id = record.present_id,
+            .actual_present_ns = record.actual_present_ns,
+        };
+        index += 1;
+    }
+    const completed = normalized[0..completed_count];
+    std.mem.sort(PresentFeedback, completed, {}, struct {
+        fn lessThan(_: void, a: PresentFeedback, b: PresentFeedback) bool {
+            return a.present_id < b.present_id;
+        }
+    }.lessThan);
+    // One monotonic pass covers both adjacent duplicates and cross-poll
+    // regression; avoids len-1 indexing.
+    var previous_id = last_completed_id.*;
+    for (completed) |feedback| {
+        if (feedback.present_id <= previous_id) return error.DuplicatePresentFeedback;
+        previous_id = feedback.present_id;
+    }
+    @memcpy(out[0..completed_count], completed);
+    last_completed_id.* = previous_id;
+    return completed_count;
+}
+
+test "task4 presentation timing rejects unsupported zero duplicate and Google overflow IDs" {
+    try std.testing.expectError(
+        error.PresentTimingUnsupported,
+        validatePresentTimingId(.unsupported, 0, 1),
+    );
+    try std.testing.expectError(
+        error.InvalidPresentTimingId,
+        validatePresentTimingId(.ext, 0, 0),
+    );
+    try std.testing.expectError(
+        error.InvalidPresentTimingId,
+        validatePresentTimingId(.ext, 7, 7),
+    );
+    try std.testing.expectError(
+        error.PresentTimingIdOutOfRange,
+        validatePresentTimingId(.google, 0, @as(u64, std.math.maxInt(u32)) + 1),
+    );
+}
+
+test "task4 presentation feedback sorts completed records and rejects duplicates" {
+    var last_completed_id: u64 = 1;
+    var out: [3]PresentFeedback = undefined;
+    var normalized: [3]PresentFeedback = undefined;
+    const count = try normalizePresentFeedback(
+        .ext,
+        &last_completed_id,
+        &.{
+            .{ .present_id = 4, .actual_present_ns = 400, .completed = true },
+            .{ .present_id = 2, .actual_present_ns = 200, .completed = true },
+            .{ .present_id = 3, .actual_present_ns = 300, .completed = false },
+        },
+        &normalized,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(u64, 2), out[0].present_id);
+    try std.testing.expectEqual(@as(u64, 4), out[1].present_id);
+    try std.testing.expectEqual(@as(u64, 4), last_completed_id);
+
+    last_completed_id = 1;
+    try std.testing.expectError(
+        error.DuplicatePresentFeedback,
+        normalizePresentFeedback(
+            .google,
+            &last_completed_id,
+            &.{
+                .{ .present_id = 2, .actual_present_ns = 200, .completed = true },
+                .{ .present_id = 2, .actual_present_ns = 201, .completed = true },
+            },
+            &normalized,
+            &out,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 1), last_completed_id);
+}
+
+test "task4 presentation output too small and invalid data consume nothing" {
+    var last_completed_id: u64 = 1;
+    const sentinel = [_]PresentFeedback{.{ .present_id = 91, .actual_present_ns = 910 }};
+    var out = sentinel;
+    var normalized: [2]PresentFeedback = undefined;
+    try std.testing.expectError(
+        error.OutputTooSmall,
+        normalizePresentFeedback(
+            .ext,
+            &last_completed_id,
+            &.{
+                .{ .present_id = 2, .actual_present_ns = 200, .completed = true },
+                .{ .present_id = 3, .actual_present_ns = 300, .completed = true },
+            },
+            &normalized,
+            &out,
+        ),
+    );
+    try std.testing.expectEqualDeep(sentinel, out);
+    try std.testing.expectEqual(@as(u64, 1), last_completed_id);
+
+    try std.testing.expectError(
+        error.InvalidPresentTimingId,
+        normalizePresentFeedback(
+            .ext,
+            &last_completed_id,
+            &.{.{ .present_id = 0, .actual_present_ns = 1, .completed = true }},
+            &normalized,
+            &out,
+        ),
+    );
+    try std.testing.expectEqualDeep(sentinel, out);
+    try std.testing.expectEqual(@as(u64, 1), last_completed_id);
+
+    var outstanding: u32 = 2;
+    try std.testing.expectError(
+        error.OutputTooSmall,
+        commitPresentFeedbackBatch(
+            .ext,
+            &last_completed_id,
+            &outstanding,
+            &.{
+                .{ .present_id = 2, .actual_present_ns = 200, .completed = true },
+                .{ .present_id = 3, .actual_present_ns = 300, .completed = true },
+            },
+            &normalized,
+            &out,
+        ),
+    );
+    try std.testing.expectEqual(@as(u32, 2), outstanding);
+    try std.testing.expectEqual(@as(u64, 1), last_completed_id);
+    try std.testing.expectEqualDeep(sentinel, out);
+}
+
+test "task4 per-surface timing mode prefers ext only with complete support" {
+    const visible: vk.PresentStageFlagsEXT = .{ .image_first_pixel_visible_bit_ext = true };
+    const support: SurfacePresentTimingSupport = .{
+        .present_id2 = true,
+        .present_timing = true,
+        .stage = visible,
+        .time_domain_id = 7,
+        .time_domain_valid = true,
+    };
+    try std.testing.expectEqual(
+        PresentTimingMode.ext,
+        resolvePresentTimingMode(true, support, true),
+    );
+
+    var incomplete = support;
+    incomplete.present_id2 = false;
+    try std.testing.expectEqual(
+        PresentTimingMode.google,
+        resolvePresentTimingMode(true, incomplete, true),
+    );
+    incomplete = support;
+    incomplete.time_domain_valid = false;
+    try std.testing.expectEqual(
+        PresentTimingMode.unsupported,
+        resolvePresentTimingMode(true, incomplete, false),
+    );
+    try std.testing.expectEqual(
+        PresentTimingMode.google,
+        resolveSurfacePresentTimingMode(false, incomplete, true),
+    );
+}
+
+test "task4 EXT timing requires calibrated timestamps and enables them once" {
+    try std.testing.expect(extPresentTimingExtensionsAvailable(true, true, true, true));
+    try std.testing.expect(!extPresentTimingExtensionsAvailable(true, true, true, false));
+    try std.testing.expect(needsCalibratedTimestamps(true, false));
+    try std.testing.expect(needsCalibratedTimestamps(false, true));
+    try std.testing.expect(needsCalibratedTimestamps(true, true));
+    try std.testing.expect(!needsCalibratedTimestamps(false, false));
+}
+
+test "task4 timed presents permit 64 outstanding and reject the 65th" {
+    inline for (.{ PresentTimingMode.ext, PresentTimingMode.google }) |mode| {
+        try validatePresentTimingRequest(mode, 63, 64, 63, max_present_feedback);
+        try std.testing.expectError(
+            error.PresentTimingQueueFull,
+            validatePresentTimingRequest(mode, 64, 65, 64, max_present_feedback),
+        );
+    }
+}
+
+test "task4 feedback batches reclaim every consumed timing slot" {
+    inline for (.{ PresentTimingMode.ext, PresentTimingMode.google }) |mode| {
+        var last_completed_id: u64 = 1;
+        var outstanding: u32 = 4;
+        var normalized: [3]PresentFeedback = undefined;
+        var out: [3]PresentFeedback = undefined;
+        const completed = try commitPresentFeedbackBatch(
+            mode,
+            &last_completed_id,
+            &outstanding,
+            &.{
+                .{ .present_id = 2, .actual_present_ns = 200, .completed = true },
+                .{ .present_id = 3, .actual_present_ns = 0, .completed = false },
+                .{ .present_id = 4, .actual_present_ns = 400, .completed = true },
+            },
+            &normalized,
+            &out,
+        );
+        try std.testing.expectEqual(@as(usize, 2), completed);
+        try std.testing.expectEqual(@as(u32, 1), outstanding);
+        try std.testing.expectEqual(@as(u64, 4), last_completed_id);
+        try std.testing.expectEqual(@as(u64, 2), out[0].present_id);
+        try std.testing.expectEqual(@as(u64, 4), out[1].present_id);
+    }
+}
+
+test "task4 failed commit reclaims consumed slots transactionally" {
+    try std.testing.expectError(
+        error.PresentFeedbackBackendError,
+        validatePresentFeedbackBatch(max_present_feedback, max_present_feedback + 1, 65),
+    );
+    try std.testing.expectError(
+        error.OutputTooSmall,
+        validatePresentFeedbackBatch(4, 4, 3),
+    );
+
+    var last_completed_id: u64 = 1;
+    var outstanding: u32 = 2;
+    const sentinel = [_]PresentFeedback{
+        .{ .present_id = 91, .actual_present_ns = 910 },
+        .{ .present_id = 92, .actual_present_ns = 920 },
+    };
+    var normalized: [2]PresentFeedback = undefined;
+    var out = sentinel;
+    try std.testing.expectError(
+        error.DuplicatePresentFeedback,
+        commitPresentFeedbackBatch(
+            .google,
+            &last_completed_id,
+            &outstanding,
+            &.{
+                .{ .present_id = 2, .actual_present_ns = 200, .completed = true },
+                .{ .present_id = 2, .actual_present_ns = 201, .completed = true },
+            },
+            &normalized,
+            &out,
+        ),
+    );
+    try std.testing.expectEqual(@as(u32, 0), outstanding);
+    try std.testing.expectEqual(@as(u64, 1), last_completed_id);
+    try std.testing.expectEqualDeep(sentinel, out);
+}
+
+test "task4 generic timestamps need only a period and queue valid bits" {
+    try std.testing.expect(timestampQueriesAvailable(1.0, 32));
+    try std.testing.expect(!timestampQueriesAvailable(0.0, 32));
+    try std.testing.expect(!timestampQueriesAvailable(1.0, 0));
+}
+
+test "task4 timestamp query handles are compact noapi tokens" {
+    try std.testing.expectEqual(@as(usize, @sizeOf(u32)), @sizeOf(TimestampQueryHandle));
+}
+
+test "task4 feedback normalization leaves output untouched on error" {
+    var last_completed_id: u64 = 1;
+    const sentinel = [_]PresentFeedback{
+        .{ .present_id = 91, .actual_present_ns = 910 },
+        .{ .present_id = 92, .actual_present_ns = 920 },
+    };
+    var out = sentinel;
+    var normalized: [2]PresentFeedback = undefined;
+    try std.testing.expectError(
+        error.DuplicatePresentFeedback,
+        normalizePresentFeedback(
+            .google,
+            &last_completed_id,
+            &.{
+                .{ .present_id = 2, .actual_present_ns = 200, .completed = true },
+                .{ .present_id = 2, .actual_present_ns = 201, .completed = true },
+            },
+            &normalized,
+            &out,
+        ),
+    );
+    try std.testing.expectEqualDeep(sentinel, out);
+    try std.testing.expectEqual(@as(u64, 1), last_completed_id);
+
+    const completed = try normalizePresentFeedback(
+        .google,
+        &last_completed_id,
+        &.{
+            .{ .present_id = 2, .actual_present_ns = 0, .completed = true },
+            .{ .present_id = 3, .actual_present_ns = 300, .completed = true },
+        },
+        &normalized,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), completed);
+    try std.testing.expectEqual(@as(u64, 3), out[0].present_id);
+}
+test "task4 presentation diagnostics retain bounded EXT query evidence" {
+    var diagnostics: PresentTimingDiagnostics = .{};
+    diagnostics.noteExtProbe(.success, 2, 11, 13);
+    diagnostics.noteExtRetrieve(.incomplete, 1, 17, 19);
+    diagnostics.noteExtRecord(
+        42,
+        1,
+        .{ .image_first_pixel_out_bit_ext = true },
+        1234,
+        true,
+    );
+
+    try std.testing.expectEqual(@as(u64, 1), diagnostics.ext_probe_calls);
+    try std.testing.expectEqual(PresentTimingCallResult.success, diagnostics.ext_probe_result);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics.ext_probe_count);
+    try std.testing.expectEqual(@as(u64, 11), diagnostics.ext_probe_timing_properties_counter);
+    try std.testing.expectEqual(@as(u64, 13), diagnostics.ext_probe_time_domains_counter);
+    try std.testing.expectEqual(PresentTimingCallResult.incomplete, diagnostics.ext_retrieve_result);
+    try std.testing.expectEqual(@as(u32, 1), diagnostics.ext_retrieve_count);
+    try std.testing.expectEqual(@as(u64, 17), diagnostics.ext_retrieve_timing_properties_counter);
+    try std.testing.expectEqual(@as(u64, 19), diagnostics.ext_retrieve_time_domains_counter);
+    try std.testing.expectEqual(@as(u64, 42), diagnostics.ext_last_record_id);
+    try std.testing.expectEqual(@as(u32, 1), diagnostics.ext_last_record_stage_count);
+    try std.testing.expectEqual(@as(u32, 4), diagnostics.ext_last_record_stage_bits);
+    try std.testing.expectEqual(@as(u64, 1234), diagnostics.ext_last_record_time);
+    try std.testing.expect(diagnostics.ext_last_record_complete);
+}
+
+test "task4 present timing watchdog uses monotonic deadline boundaries" {
+    const start: i96 = 100;
+    try std.testing.expectEqual(
+        PresentTimingWatchdogDecision.wait,
+        presentTimingWatchdogDecision(1, start, start + 4_999_999_999),
+    );
+    try std.testing.expectEqual(
+        PresentTimingWatchdogDecision.disable,
+        presentTimingWatchdogDecision(1, start, start + 5_000_000_000),
+    );
+    try std.testing.expectEqual(
+        PresentTimingWatchdogDecision.wait,
+        presentTimingWatchdogDecision(0, start, start + 5_000_000_000),
+    );
+    try std.testing.expectEqual(
+        PresentTimingWatchdogDecision.wait,
+        presentTimingWatchdogDecision(1, null, start + 5_000_000_000),
+    );
+}
+test "task4 present timing watchdog resets after completed progress" {
+    const initial_start: ?i96 = 100;
+    const progressed_start = presentTimingWatchdogProgressStart(
+        1,
+        initial_start,
+        5_000_000_100,
+        1,
+    );
+    try std.testing.expectEqual(@as(?i96, 5_000_000_100), progressed_start);
+    try std.testing.expectEqual(
+        PresentTimingWatchdogDecision.wait,
+        presentTimingWatchdogDecision(1, progressed_start, 9_999_999_999),
+    );
+    try std.testing.expectEqual(
+        PresentTimingWatchdogDecision.disable,
+        presentTimingWatchdogDecision(1, progressed_start, 10_000_000_100),
+    );
+    try std.testing.expectEqual(
+        @as(?i96, null),
+        presentTimingWatchdogProgressStart(0, progressed_start, 10_000_000_100, 1),
+    );
+    try std.testing.expectEqual(
+        initial_start,
+        presentTimingWatchdogProgressStart(1, initial_start, 10_000_000_100, 0),
+    );
+}
+
+test "task4 runtime timing failure falls back EXT to Google then unsupported" {
+    var win: Window = .{
+        .timing_mode = .ext,
+        .present_stage_queries = .{ .image_first_pixel_out_bit_ext = true },
+        .present_stage_support = .{ .image_first_pixel_out_bit_ext = true },
+        .present_time_domain_count = 1,
+        .time_domain_id = 17,
+        .time_domain_valid = true,
+        .last_present_timing_id = 23,
+        .last_feedback_id = 22,
+        .outstanding_timed_presents = 3,
+        .first_timed_present_start_ns = std.Io.Timestamp.fromNanoseconds(100),
+        .present_timing_diagnostics = .{
+            .mode = .ext,
+            .outstanding_timed_presents = 3,
+            .ext_last_record_id = 21,
+            .ext_last_record_time = 2_100,
+            .ext_complete_records = 4,
+            .ext_positive_records = 3,
+        },
+    };
+
+    abandonPresentTiming(&win, true);
+    try std.testing.expectEqual(PresentTimingMode.google, win.timing_mode);
+    try std.testing.expectEqual(@as(u64, 23), win.last_present_timing_id);
+    try std.testing.expectEqual(@as(u64, 22), win.last_feedback_id);
+    try std.testing.expectError(
+        error.InvalidPresentTimingId,
+        validatePresentTimingId(.google, win.last_present_timing_id, 22),
+    );
+    try std.testing.expectError(
+        error.InvalidPresentTimingId,
+        validatePresentTimingId(.google, win.last_present_timing_id, 23),
+    );
+    try validatePresentTimingId(.google, win.last_present_timing_id, 24);
+    try std.testing.expectEqual(@as(u32, 0), win.outstanding_timed_presents);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), win.first_timed_present_start_ns);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(win.present_stage_queries)));
+    try std.testing.expectEqual(@as(u32, 0), win.present_time_domain_count);
+    try std.testing.expectEqual(PresentTimingMode.google, win.present_timing_diagnostics.mode);
+    try std.testing.expectEqual(@as(u64, 21), win.present_timing_diagnostics.ext_last_record_id);
+    try std.testing.expectEqual(@as(u64, 2_100), win.present_timing_diagnostics.ext_last_record_time);
+    try std.testing.expectEqual(@as(u32, 4), win.present_timing_diagnostics.ext_complete_records);
+    try std.testing.expectEqual(@as(u32, 3), win.present_timing_diagnostics.ext_positive_records);
+
+    win.last_present_timing_id = 7;
+    win.last_feedback_id = 6;
+    win.outstanding_timed_presents = 1;
+    win.first_timed_present_start_ns = std.Io.Timestamp.fromNanoseconds(200);
+    abandonPresentTiming(&win, true);
+    try std.testing.expectEqual(PresentTimingMode.unsupported, win.timing_mode);
+    try std.testing.expectEqual(@as(u64, 7), win.last_present_timing_id);
+    try std.testing.expectEqual(@as(u64, 6), win.last_feedback_id);
+    try std.testing.expectEqual(@as(u32, 0), win.outstanding_timed_presents);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), win.first_timed_present_start_ns);
+}
+
+test "task4 EXT runtime fallback requires a usable Google ID range" {
+    var no_google: Window = .{
+        .timing_mode = .ext,
+        .last_present_timing_id = 1,
+    };
+    abandonPresentTiming(&no_google, false);
+    try std.testing.expectEqual(PresentTimingMode.unsupported, no_google.timing_mode);
+
+    var exhausted_google: Window = .{
+        .timing_mode = .ext,
+        .last_present_timing_id = std.math.maxInt(u32),
+    };
+    abandonPresentTiming(&exhausted_google, true);
+    try std.testing.expectEqual(PresentTimingMode.unsupported, exhausted_google.timing_mode);
+
+    var exhausted_feedback: Window = .{
+        .timing_mode = .ext,
+        .last_feedback_id = std.math.maxInt(u32),
+    };
+    abandonPresentTiming(&exhausted_feedback, true);
+    try std.testing.expectEqual(PresentTimingMode.unsupported, exhausted_feedback.timing_mode);
+}
+
+test "task4 Google feedback high-water survives EXT fallback" {
+    var win: Window = .{
+        .timing_mode = .ext,
+        .last_present_timing_id = 50,
+        .last_feedback_id = 10,
+    };
+    abandonPresentTiming(&win, true);
+    try std.testing.expectEqual(PresentTimingMode.google, win.timing_mode);
+
+    var normalized: [1]PresentFeedback = undefined;
+    var out: [1]PresentFeedback = undefined;
+    try std.testing.expectError(
+        error.InvalidPresentTimingId,
+        normalizePresentFeedback(
+            .google,
+            &win.last_feedback_id,
+            &.{.{ .present_id = 9, .actual_present_ns = 900, .completed = true }},
+            &normalized,
+            &out,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 10), win.last_feedback_id);
+    try std.testing.expectError(
+        error.InvalidPresentTimingId,
+        normalizePresentFeedback(
+            .google,
+            &win.last_feedback_id,
+            &.{.{ .present_id = 10, .actual_present_ns = 1_000, .completed = true }},
+            &normalized,
+            &out,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 10), win.last_feedback_id);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try normalizePresentFeedback(
+            .google,
+            &win.last_feedback_id,
+            &.{.{ .present_id = 11, .actual_present_ns = 1_100, .completed = true }},
+            &normalized,
+            &out,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 11), win.last_feedback_id);
+}
+
+test "task4 mixed positive and complete-zero batch fails before output commit" {
+    inline for (.{ PresentTimingMode.ext, PresentTimingMode.google }) |mode| {
+        var last_completed_id: u64 = 4;
+        var outstanding: u32 = 3;
+        var normalized: [2]PresentFeedback = undefined;
+        const sentinel = [_]PresentFeedback{
+            .{ .present_id = 91, .actual_present_ns = 910 },
+            .{ .present_id = 92, .actual_present_ns = 920 },
+        };
+        var out = sentinel;
+
+        try std.testing.expectError(
+            error.PresentTimingDataUnavailable,
+            commitPresentFeedbackBatch(
+                mode,
+                &last_completed_id,
+                &outstanding,
+                &.{
+                    .{ .present_id = 5, .actual_present_ns = 500, .completed = true },
+                    .{ .present_id = 6, .actual_present_ns = 0, .completed = true },
+                },
+                &normalized,
+                &out,
+            ),
+        );
+        try std.testing.expectEqual(@as(u64, 4), last_completed_id);
+        try std.testing.expectEqual(@as(u32, 1), outstanding);
+        try std.testing.expectEqualDeep(sentinel, out);
+    }
+}
+
+test "task4 incomplete zero and later positive batches remain usable" {
+    inline for (.{ PresentTimingMode.ext, PresentTimingMode.google }) |mode| {
+        var last_completed_id: u64 = 4;
+        var outstanding: u32 = 3;
+        var normalized: [2]PresentFeedback = undefined;
+        var out: [2]PresentFeedback = undefined;
+
+        const completed = try commitPresentFeedbackBatch(
+            mode,
+            &last_completed_id,
+            &outstanding,
+            &.{
+                .{ .present_id = 5, .actual_present_ns = 0, .completed = false },
+                .{ .present_id = 6, .actual_present_ns = 600, .completed = true },
+            },
+            &normalized,
+            &out,
+        );
+        try std.testing.expectEqual(@as(usize, 1), completed);
+        try std.testing.expectEqual(@as(u64, 6), last_completed_id);
+        try std.testing.expectEqual(@as(u32, 1), outstanding);
+        try std.testing.expectEqual(@as(u64, 6), out[0].present_id);
+    }
+}
+
+test "task4 frame result marks only OutOfDate presents" {
+    try std.testing.expect(!frameResultForPresentQueue(.success).present_out_of_date);
+    try std.testing.expect(!frameResultForPresentQueue(.suboptimal).present_out_of_date);
+    try std.testing.expect(frameResultForPresentQueue(.out_of_date).present_out_of_date);
+    try std.testing.expect(!frameResultForPresentQueue(.surface_lost).present_out_of_date);
+}
+
+test "task4 OutOfDate preserves timing state and advances frame recovery" {
+    var win: Window = .{
+        .frames_in_flight = 2,
+        .frame_index = 0,
+        .last_present_timing_id = 17,
+        .last_feedback_id = 16,
+        .outstanding_timed_presents = 2,
+    };
+
+    const failed = notePresentQueueFailure(&win, error.OutOfDateKHR);
+    try std.testing.expect(failed.present_out_of_date);
+    try std.testing.expect(win.needs_resize);
+    try std.testing.expectEqual(@as(u32, 0), win.frame_index);
+    try std.testing.expectEqual(@as(u64, 17), win.last_present_timing_id);
+    try std.testing.expectEqual(@as(u64, 16), win.last_feedback_id);
+    try std.testing.expectEqual(@as(u32, 2), win.outstanding_timed_presents);
+
+    advanceFrame(&win, 0);
+    try std.testing.expectEqual(@as(u32, 1), win.frame_index);
+    const recovered = frameResultForPresentQueue(.success);
+    try std.testing.expect(!recovered.present_out_of_date);
+    advanceFrame(&win, 1);
+    try std.testing.expectEqual(@as(u32, 0), win.frame_index);
 }

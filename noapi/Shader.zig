@@ -15,10 +15,13 @@ pub const ShaderStage = enum(u2) {
 };
 
 pub fn create(gpu: *Gpu, spv: []const u32, stage: ShaderStage, entry: [:0]const u8, name: [:0]const u8) !Shader {
-    _ = name;
     const handle = try gpu.backend.shaderCreate(spv, @intFromEnum(stage), entry);
+    if (comptime @hasDecl(@TypeOf(gpu.backend.*), "setDebugName")) {
+        gpu.backend.setDebugName(.shader_ext, @intFromEnum(handle), name);
+    }
     return .{ .gpu = gpu, .handle = handle, .stage = stage };
 }
+
 pub fn createFromPath(
     alloc: std.mem.Allocator,
     io: Io,

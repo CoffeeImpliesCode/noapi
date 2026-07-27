@@ -51,45 +51,49 @@
 
 ## Remaining Issues
 
-### 1. GpuArena — needs Gpu reference (P0)
-`GpuArena.create()` takes no `*Gpu`, so `gpuMalloc` can't be called → returns `BackendError`.  
-**Fix**: `create(gpu: *Gpu, size: usize)` delegate to `gpu.gpuMalloc`.  
-**File**: `noapi/GpuArena.zig`
+### 1. GpuArena — RESOLVED
+Was: `create()` took no `*Gpu`, `gpuMalloc` unreachable, returned `BackendError`.
+Now: `noapi/GpuArena.zig:12` — `create(base: GpuPtr, size: usize)` bump arena atop caller-owned block; `alloc`/`allocT` align forward, panic past `size`; `reset` reuses, `destroy` invalidates.
 
-### 2. Gpu.bufferCreate / bufferDestroy — dead code (P0)
-Both are no-ops. The codebase uses `GpuPtr` + `gpuMalloc`/`gpuFree` instead (no_gfx_api pattern).  
-**Fix**: Wire through backend OR delete `Buffer` struct + methods.  
-**File**: `noapi/Gpu.zig`
+### 2. Gpu.bufferCreate / bufferDestroy — RESOLVED
+Was: no-ops.
+Now: `noapi/Gpu.zig:184` — `bufferCreate` delegates to `gpuMalloc(desc.size, 64, .gpu)`; `bufferDestroy` delegates to `gpuFree`.
 
-### 3. Gpu.drawTriangles — dead code (P1)
-All args ignored, does nothing. Vestige of dvui pattern. API uses `CommandBuffer.draw[Indexed]` instead.  
-**Fix**: Wire to indexed draw OR delete.  
-**File**: `noapi/Gpu.zig`
+### 3. Gpu.drawTriangles — RESOLVED
+Was: ignored args, did nothing.
+Now: deleted; no match in `noapi/`; indexed draws go through `CommandBuffer.draw`/`drawIndexed`.
 
-### 4. DescriptorPool alloc* — return 0 (P1)
-`allocTexture`/`allocSampler` all return 0 without proper freelist tracking. Works for single allocations but breaks on multiple.  
-**Fix**: Implement sequential slot tracking with counters.  
-**File**: `noapi/DescriptorPool.zig`
+### 4. DescriptorPool alloc* — RESOLVED
+Was: all `alloc*` returned 0.
+Now: `noapi/DescriptorPool.zig:16` — per-type freelists plus `texture/texture_rw/sampler_count` counters; `alloc*` pops freelist else bumps counter and writes heap descriptors; `free*`/`freeAll` recycle.
 
-### 5. Gpu.gpuHostToDevicePointer — stub (P1)
-Ignores args, returns zeroed GpuPtr. Needs BDA-based implementation or identity mapping.  
-**Fix**: `return GpuPtr{ .cpu = cpu_ptr, .gpu = @intFromPtr(cpu_ptr) };`  
-**File**: `noapi/Gpu.zig`
+### 5. Gpu.gpuHostToDevicePointer — RESOLVED
+Was: ignored args, returned zeroed `GpuPtr`.
+Now: `noapi/Gpu.zig:290` forwards to `noapi/VkBackend.zig:4640`, which scans `allocs` for the containing range and returns `cpu` plus BDA `gpu_addr + offset`; identity maps only on miss.
 
-### 6. Gpu.zig duplicate type re-exports (P2)
-~40 `pub const TextureHandle = @import(...)` at bottom of Gpu.zig duplicates root.zig exports.  
-**Fix**: Remove block.  
-**File**: `noapi/Gpu.zig`
+### 6. Gpu.zig duplicate type re-exports — RESOLVED
+Was: ~40 `pub const X = @import(...)` lines duplicated `root.zig`.
+Now: `noapi/Gpu.zig:298` tail holds only `FrameSchedule`/`FrameResult`/`PresentInfo`/`PresentFeedback` plus tests; public re-exports live in `noapi/root.zig`.
 
-### 7. Swapchain format selection always picks first (P2)
-Line 1531: `var chosen_format: vk.SurfaceFormatKHR = formats[0];` — if b8g8r8a8_srgb isn't first, falls back to first entry.  
-**Fix**: More robust format preference loop.  
-**File**: `noapi/VkBackend.zig:1531`
+### 7. Swapchain format selection first-pick (P2, owned by SwapchainFormat task)
+`noapi/VkBackend.zig:3497` seeds `chosen_format = formats[0]`, then prefers `b8g8r8a8_srgb + srgb_nonlinear_khr`. Improved by preference order; full preference loop lands in the SwapchainFormat task.
 
-### 8. Example frame pacing — no sleep (P2)
-All examples busy-loop at CPU speed. With FIFO vsync, Wayland/niri may not block acquire properly → 100% CPU.  
-**Fix**: Use `FrameSchedule.next_vblank_us` or `std.time.sleep` for frame pacing.  
-**Files**: All examples
+### 8. Example frame pacing — no sleep (P2, open)
+`3_3D`/`5_indirect_triangles`/`6_compute_shaders` pace with a timeline semaphore (`semaphoreWait` on `frame_sem`). `1_triangle`/`2_textures`/`4_textures_advanced`/`7_deferred_async_load` still busy-loop on `FrameTimer` only.
+**Fix**: extend semaphore pacing to the unpaced examples, or sleep on `FrameSchedule.next_vblank_us`.
+
+## Timing Backport Status
+Backported from `lxrmvysx/vendor` pin `f11603da` into the working copy:
+- `TimestampQuerySet` (`noapi/TimestampQuerySet.zig`): `TimestampStage`, `TimestampInfo` (`mask`/`spanTicks`), `validateQueryRange`; `Gpu.timestampInfo/timestampQuerySetCreate/timestampQuerySetDestroy/timestampQuerySetRead`; `CommandBuffer.timestampReset/timestampWrite` with range checks; `VkBackend` query-pool create/read/reset/write with `TimestampQueriesUnsupported` guard.
+- Present feedback (`noapi/Surface.zig:105`, `noapi/VkBackend.zig:2281`): `pollPresentFeedback` writes into caller storage, never allocates, returns `OutputTooSmall` before it consumes a record; EXT/GOOGLE timing backends behind a 64-record bounded scratch drain.
+- `deviceIdentity` (`noapi/Gpu.zig:44`, `noapi/VkBackend.zig:3360`): name, vendor/device id, driver string from the selected physical device.
+- `queueSubmitWaitSignal` (`noapi/Gpu.zig:238`, `noapi/Queue.zig:34`, `noapi/VkBackend.zig:2139`): timeline wait/signal submit path alongside `queueSubmit`.
+- Strict submit: `Queue.submit/submitSignal/submitWaitSignal` return early on zero command buffers; all submit paths copy handles through a 64-slot `copyCommandBufferHandles` that rejects oversize lists with `TooManyCommandBuffers`.
+
+## Changelog (Wave 1)
+- Strict submit: empty-submit early return on `Queue` paths; 64-handle cap enforced in `Gpu` and `Queue` (`TooManyCommandBuffers`).
+- Index format: `CommandBuffer.IndexFormat` carries Vulkan values (`u16=0`, `u32=1`, `u8=1000265000`, `none=1000165000`); threaded through `drawIndexed`/`drawIndexedIndirect`/`drawIndexedIndirectMulti`/`bindIndexBuffer` into `VkBackend.cmdBindIndexBuffer` via `@enumFromInt`.
+- `commandsEnd` removed: no `commandsEnd` remains in `Gpu`/`Queue`/`Surface`/`VkBackend`; `commandsBegin` yields the handle and submission closes it via `queueSubmit`; examples follow begin-record-submit only.
 
 ## Build Config
 - `use_llvm = true` on all 8 executables

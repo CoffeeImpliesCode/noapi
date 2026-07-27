@@ -328,7 +328,7 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
                 },
             );
             cmd.bindVertexBuffer(0, s.vert_buf, 0);
-            cmd.drawIndexed(.{}, s.idx_buf, 3, 1, 0, 0);
+            cmd.drawIndexed(.{}, s.idx_buf, .u32, 3, 1, 0, 0);
             cmd.endDebugLabel();
         }
 
@@ -359,7 +359,7 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
                 },
             );
             cmd.bindVertexBuffer(0, s.vert_buf, 0);
-            cmd.drawIndexed(.{}, s.idx_buf, 3, 1, 3, 0);
+            cmd.drawIndexed(.{}, s.idx_buf, .u32, 3, 1, 3, 0);
             cmd.endDebugLabel();
         }
 
@@ -370,9 +370,15 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
             const blit_sz: u32 = @min(256, @min(surface_size.width, surface_size.height));
             cmd.blitTextureHandle(
                 sc,
-                .{ .offset_a = .{ 0, 0, 0 }, .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 } },
+                .{
+                    .offset_a = .{ 0, 0, 0 },
+                    .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 },
+                },
                 s.rt_tex,
-                .{ .offset_a = .{ 0, 0, 0 }, .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 } },
+                .{
+                    .offset_a = .{ 0, 0, 0 },
+                    .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 },
+                },
                 .linear,
             );
         }
@@ -392,9 +398,15 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
             const sy: i32 = @intCast(surface_size.height -| blit_sz);
             cmd.blitTextureHandle(
                 sc,
-                .{ .offset_a = .{ sx, sy, 0 }, .offset_b = .{ sx + @as(i32, @intCast(blit_sz)), sy + @as(i32, @intCast(blit_sz)), 1 } },
+                .{
+                    .offset_a = .{ sx, sy, 0 },
+                    .offset_b = .{ sx + @as(i32, @intCast(blit_sz)), sy + @as(i32, @intCast(blit_sz)), 1 },
+                },
                 s.compute_tex,
-                .{ .offset_a = .{ 0, 0, 0 }, .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 } },
+                .{
+                    .offset_a = .{ 0, 0, 0 },
+                    .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 },
+                },
                 .linear,
             );
         }
@@ -411,7 +423,10 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
         cmd.addWaitSemaphore(win.index, s.test_sem, s.sem_val - 1);
         cmd.addSignalSemaphore(win.index, s.test_sem, s.sem_val);
 
-        _ = win.endFrame(.{ .blit_to_swapchain = true }) catch {};
+        _ = win.endFrame(.{ .blit_to_swapchain = true }) catch |err| std.log.warn(
+            "endFrame failed: {s}",
+            .{@errorName(err)},
+        );
     }
 }
 
@@ -473,7 +488,10 @@ fn window2(win: *noapi.Surface, s: *SharedW2) void {
             }, .linear);
         }
 
-        _ = win.endFrame(.{ .blit_to_swapchain = true }) catch {};
+        _ = win.endFrame(.{ .blit_to_swapchain = true }) catch |err| std.log.warn(
+            "endFrame failed: {s}",
+            .{@errorName(err)},
+        );
     }
 }
 

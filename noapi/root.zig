@@ -62,9 +62,41 @@ pub const Gpu = @import("Gpu.zig").Gpu;
 pub const FrameSchedule = @import("Gpu.zig").FrameSchedule;
 pub const FrameResult = @import("Gpu.zig").FrameResult;
 pub const PresentInfo = @import("Gpu.zig").PresentInfo;
+pub const PresentFeedback = @import("Gpu.zig").PresentFeedback;
+pub const TimestampStage = @import("TimestampQuerySet.zig").TimestampStage;
+pub const TimestampInfo = @import("TimestampQuerySet.zig").TimestampInfo;
+pub const TimestampQuerySet = @import("TimestampQuerySet.zig").TimestampQuerySet;
+pub const validateTimestampQueryRange = @import("TimestampQuerySet.zig").validateQueryRange;
 pub const CommandBuffer = @import("CommandBuffer.zig");
 pub const VertexBinding = @import("VertexInput.zig").VertexBinding;
 pub const VertexAttribute = @import("VertexInput.zig").VertexAttribute;
+
+test "task4 timestamp masks and modular spans cover 1 32 and 64 valid bits" {
+    const one_bit: TimestampInfo = .{ .period_ns = 1.0, .valid_bits = 1 };
+    try std.testing.expectEqual(@as(u64, 0x1), one_bit.mask());
+    try std.testing.expectEqual(@as(u64, 1), one_bit.spanTicks(1, 0));
+
+    const thirty_two_bit: TimestampInfo = .{ .period_ns = 1.0, .valid_bits = 32 };
+    try std.testing.expectEqual(@as(u64, 0xffff_ffff), thirty_two_bit.mask());
+    try std.testing.expectEqual(@as(u64, 3), thirty_two_bit.spanTicks(0xffff_fffe, 1));
+
+    const sixty_four_bit: TimestampInfo = .{ .period_ns = 1.0, .valid_bits = 64 };
+    try std.testing.expectEqual(std.math.maxInt(u64), sixty_four_bit.mask());
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        sixty_four_bit.spanTicks(std.math.maxInt(u64) - 1, 1),
+    );
+}
+
+test "task4 timestamp query spans reject zero overflow and out of range" {
+    try std.testing.expectError(error.InvalidTimestampRange, validateTimestampQueryRange(4, 0, 0));
+    try std.testing.expectError(
+        error.InvalidTimestampRange,
+        validateTimestampQueryRange(4, std.math.maxInt(u32), 2),
+    );
+    try std.testing.expectError(error.InvalidTimestampRange, validateTimestampQueryRange(4, 3, 2));
+    try validateTimestampQueryRange(4, 1, 3);
+}
 
 const std = @import("std");
 test {

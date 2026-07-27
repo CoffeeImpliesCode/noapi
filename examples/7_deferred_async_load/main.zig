@@ -9,7 +9,6 @@
 const std = @import("std");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
-const vk = noapi.vk;
 const DescriptorPool = noapi.DescriptorPool;
 const Io = std.Io;
 const common = @import("common");
@@ -36,21 +35,53 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.App.init(gpa, "7_deferred_async_load", start_width, start_height, frames_in_flight, io);
+    var app = try common.App.init("7_deferred_async_load", gpa, io, start_width, start_height, frames_in_flight, false);
     defer app.deinit();
     try app.sdl_win.show();
 
-    // ── Shaders ────────────────────────────────────────────
-    const vert_gbuffer = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/gbuffer_vert.spv", .vertex, "main", "gbuffer_vert");
+    // ── Shaders ────────────────────────────────
+    const vert_gbuffer = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/gbuffer_vert.spv",
+        .vertex,
+        "main",
+        "gbuffer_vert",
+    );
     defer vert_gbuffer.destroy();
-    const frag_gbuffer = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/gbuffer_frag.spv", .fragment, "main", "gbuffer_frag");
+    const frag_gbuffer = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/gbuffer_frag.spv",
+        .fragment,
+        "main",
+        "gbuffer_frag",
+    );
     defer frag_gbuffer.destroy();
-    const vert_final = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/final_pass_vert.spv", .vertex, "main", "final_pass_vert");
+    const vert_final = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/final_pass_vert.spv",
+        .vertex,
+        "main",
+        "final_pass_vert",
+    );
     defer vert_final.destroy();
-    const frag_final = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/final_pass_frag.spv", .fragment, "main", "final_pass_frag");
+    const frag_final = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/final_pass_frag.spv",
+        .fragment,
+        "main",
+        "final_pass_frag",
+    );
     defer frag_final.destroy();
 
-    // ── Descriptor pool ─────────────────────────────────────
+    // ── Descriptor pool ──────────────────────────────
     var pool = try DescriptorPool.init(app.gpu, 8, 0, 8);
     defer pool.deinit();
 
@@ -64,11 +95,11 @@ pub fn main(init: std.process.Init) !void {
     // Allocate default texture at slot 3
     _ = pool.allocTexture(default_tex.handle, samp_handle, .@"2d");
 
-    // ── Load environment map ──────────────────────────────────
+    // ── Load environment map ────────────────────────────
     const env_map_idx_val = try loadEnvMap(gpa, io, app.gpu, &pool, samp_handle);
     env_map_idx = env_map_idx_val;
 
-    // ── Upload geometry (cube) ──────────────────────────────
+    // ── Upload geometry (cube) ───────────────────────────
     const cube_data = createCubeData(gpa);
     defer {
         gpa.free(cube_data.positions);
@@ -77,47 +108,57 @@ pub fn main(init: std.process.Init) !void {
         gpa.free(cube_data.indices);
     }
 
-    const cube_pos_gpu = try common.gpuCreate(app.gpu, [4]f32, cube_data.positions, 64);
+    const cube_pos_gpu = try common.gpuCreate([4]f32, app.gpu, cube_data.positions, 64);
     defer app.gpu.gpuFree(cube_pos_gpu);
 
-    const cube_norm_gpu = try common.gpuCreate(app.gpu, [4]f32, cube_data.normals, 64);
+    const cube_norm_gpu = try common.gpuCreate([4]f32, app.gpu, cube_data.normals, 64);
     defer app.gpu.gpuFree(cube_norm_gpu);
 
-    const cube_uv_gpu = try common.gpuCreate(app.gpu, [2]f32, cube_data.uvs, 64);
+    const cube_uv_gpu = try common.gpuCreate([2]f32, app.gpu, cube_data.uvs, 64);
     defer app.gpu.gpuFree(cube_uv_gpu);
 
-    const cube_idx_gpu = try common.gpuCreate(app.gpu, u32, cube_data.indices, 64);
+    const cube_idx_gpu = try common.gpuCreate(u32, app.gpu, cube_data.indices, 64);
     defer app.gpu.gpuFree(cube_idx_gpu);
 
-    // ── Fullscreen quad ─────────────────────────────────────
+    // ── Fullscreen quad ──────────────────────────────
     const fsq = createFullscreenQuad(gpa);
     defer {
         gpa.free(fsq.vertices);
         gpa.free(fsq.indices);
     }
 
-    const fsq_vert_gpu = try common.gpuCreate(app.gpu, FullscreenVertex, fsq.vertices, 64);
+    const fsq_vert_gpu = try common.gpuCreate(FullscreenVertex, app.gpu, fsq.vertices, 64);
     defer app.gpu.gpuFree(fsq_vert_gpu);
 
-    const fsq_idx_gpu = try common.gpuCreate(app.gpu, u32, fsq.indices, 64);
+    const fsq_idx_gpu = try common.gpuCreate(u32, app.gpu, fsq.indices, 64);
     defer app.gpu.gpuFree(fsq_idx_gpu);
 
-    // ── G-buffer textures ───────────────────────────────────
+    // ── G-buffer textures ─────────────────────────────
     var window_w: i32 = start_width;
     var window_h: i32 = start_height;
     var gb_albedo: noapi.Texture.OwnedTexture = undefined;
     var gb_normal: noapi.Texture.OwnedTexture = undefined;
     var gb_mr: noapi.Texture.OwnedTexture = undefined;
     var gb_depth: noapi.Texture.OwnedTexture = undefined;
-    try createGbufferTextures(app.gpu, &pool, @intCast(window_w), @intCast(window_h), &gb_albedo, &gb_normal, &gb_mr, &gb_depth, samp_handle);
+    try createGbufferTextures(
+        app.gpu,
+        &pool,
+        @intCast(window_w),
+        @intCast(window_h),
+        &gb_albedo,
+        &gb_normal,
+        &gb_mr,
+        &gb_depth,
+        samp_handle,
+    );
     defer {
-        gb_albedo.freeAndDestroy();
-        gb_normal.freeAndDestroy();
-        gb_mr.freeAndDestroy();
-        gb_depth.freeAndDestroy();
+        gb_albedo.deinit();
+        gb_normal.deinit();
+        gb_mr.deinit();
+        gb_depth.deinit();
     }
 
-    // ── Push constant structs ──────────────────────────────
+    // ── Push constant structs ─────────────────────────
     const VertData = extern struct {
         positions: u64,
         normals: u64,
@@ -171,13 +212,10 @@ pub fn main(init: std.process.Init) !void {
     const push_buf = try app.gpu.gpuMalloc(total_size + fsq_push_size, 64, .default);
     defer app.gpu.gpuFree(push_buf);
 
-    // ── Render loop ────────────────────────────────────────
+    // ── Render loop ───────────────────────────────
     const win_id = try app.sdl_win.getId();
     var should_close = false;
-    // ── FPS counter ─────────────────────────────────────────
-    var fps_timer: u64 = sdl3.timer.getPerformanceCounter();
-    var fps_frames: u32 = 0;
-    const fps_freq: u64 = sdl3.timer.getPerformanceFrequency();
+    var timer = common.FrameTimer.init();
     while (!should_close) {
         while (sdl3.events.poll()) |ev| {
             switch (ev) {
@@ -193,12 +231,19 @@ pub fn main(init: std.process.Init) !void {
                         selected_texture_type = (selected_texture_type + 1) % 4;
                         const names = [_][*:0]const u8{ "Albedo", "Normal", "Metallic/Roughness", "Shaded" };
                         var buf: [128]u8 = undefined;
-                        const title = std.fmt.bufPrintZ(&buf, "Deferred Shading — {s}", .{names[selected_texture_type]}) catch unreachable;
-                        app.sdl_win.setTitle(title) catch unreachable;
+                        const title = std.fmt.bufPrintZ(
+                            &buf,
+                            "Deferred Shading — {s}",
+                            .{names[selected_texture_type]},
+                        ) catch "Deferred Shading";
+                        app.sdl_win.setTitle(title) catch |err| std.log.warn("setTitle failed: {}", .{err});
                     }
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (we.id == win_id) app.surf.notifyResize(.{
+                        .width = @intCast(we.width),
+                        .height = @intCast(we.height),
+                    });
                 },
                 else => {},
             }
@@ -210,23 +255,12 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
 
-        // ── Delta time ─────────────────────────────────────
+        // ── Delta time ──────────────────────────────
         // DIAG: check device on first frame
-        if (fps_frames == 0) try app.gpu.waitIdle();
+        if (timer.fps_count == 0) try app.gpu.waitIdle();
+        timer.report();
 
-        // ── FPS output ──────────────────────────────────────
-        fps_frames += 1;
-        if (fps_frames == 60) {
-            const now = sdl3.timer.getPerformanceCounter();
-            const elapsed_ns = now - fps_timer;
-            const fps = @as(f64, @floatFromInt(fps_freq * fps_frames)) / @as(f64, @floatFromInt(elapsed_ns));
-            const ms = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(fps_freq * fps_frames)) * 1000.0;
-            std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
-            fps_timer = now;
-            fps_frames = 0;
-        }
-
-        // ── Render frame ────────────────────────────────────
+        // ── Render frame ─────────────────────────────
         _ = app.surf.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
@@ -239,26 +273,51 @@ pub fn main(init: std.process.Init) !void {
             window_h = @as(i32, @intCast(surface_size.height));
             try app.gpu.waitIdle();
 
-            gb_albedo.freeAndDestroy();
-            gb_normal.freeAndDestroy();
-            gb_mr.freeAndDestroy();
-            gb_depth.freeAndDestroy();
-            try createGbufferTextures(app.gpu, &pool, @intCast(window_w), @intCast(window_h), &gb_albedo, &gb_normal, &gb_mr, &gb_depth, samp_handle);
+            gb_albedo.deinit();
+            gb_normal.deinit();
+            gb_mr.deinit();
+            gb_depth.deinit();
+            try createGbufferTextures(
+                app.gpu,
+                &pool,
+                @intCast(window_w),
+                @intCast(window_h),
+                &gb_albedo,
+                &gb_normal,
+                &gb_mr,
+                &gb_depth,
+                samp_handle,
+            );
         }
 
-        // ── Camera ──────────────────────────────────────────
-        const aspect = @as(f32, @floatFromInt(window_w)) / @as(f32, @floatFromInt(window_h));
+        // ── Camera ──────────────────────────────
+        const aspect: f32 = @floatCast(@as(f64, @floatFromInt(window_w)) / @as(f64, @floatFromInt(window_h)));
         const view = common.lookAt(.{ 3.0, 2.0, 3.0 }, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
         const proj = common.perspective(59.0 * std.math.pi / 180.0, aspect, 0.1, 1000.0);
 
         var cmd = app.surf.commandsBegin();
 
-        // ── Pass 1: G-buffer ────────────────────────────────
+        // ── Pass 1: G-buffer ────────────────────────────
         cmd.beginRendering(.{
             .color_attachments = &.{
-                .{ .texture = gb_albedo.texture.handle, .load_op = .clear, .store_op = .store, .clear_color = .{ 0, 0, 0, 1 } },
-                .{ .texture = gb_normal.texture.handle, .load_op = .clear, .store_op = .store, .clear_color = .{ 0.5, 0.5, 1.0, 1.0 } },
-                .{ .texture = gb_mr.texture.handle, .load_op = .clear, .store_op = .store, .clear_color = .{ 0, 0, 0, 1 } },
+                .{
+                    .texture = gb_albedo.texture.handle,
+                    .load_op = .clear,
+                    .store_op = .store,
+                    .clear_color = .{ 0, 0, 0, 1 },
+                },
+                .{
+                    .texture = gb_normal.texture.handle,
+                    .load_op = .clear,
+                    .store_op = .store,
+                    .clear_color = .{ 0.5, 0.5, 1.0, 1.0 },
+                },
+                .{
+                    .texture = gb_mr.texture.handle,
+                    .load_op = .clear,
+                    .store_op = .store,
+                    .clear_color = .{ 0, 0, 0, 1 },
+                },
             },
             .depth_attachment = noapi.RenderingAttachment{
                 .texture = gb_depth.texture.handle,
@@ -306,6 +365,7 @@ pub fn main(init: std.process.Init) !void {
                 .indirect = 0,
             },
             cube_idx_gpu,
+            .u32,
             @intCast(cube_data.indices.len),
             1,
             0,
@@ -386,7 +446,7 @@ pub fn main(init: std.process.Init) !void {
     try app.gpu.waitIdle();
 }
 
-// ── Geometry helpers ──────────────────────────────────────────
+// ── Geometry helpers ───────────────────────────────
 
 const CubeData = struct {
     positions: []const [4]f32,
@@ -399,14 +459,23 @@ fn createCubeData(allocator: std.mem.Allocator) CubeData {
     const positions = allocator.dupe(
         [4]f32,
         &[_][4]f32{
-            .{ -0.5, -0.5, 0.5, 1.0 },  .{ 0.5, -0.5, 0.5, 1.0 },   .{ 0.5, 0.5, 0.5, 1.0 },   .{ -0.5, 0.5, 0.5, 1.0 },
-            .{ 0.5, -0.5, -0.5, 1.0 },  .{ -0.5, -0.5, -0.5, 1.0 }, .{ -0.5, 0.5, -0.5, 1.0 }, .{ 0.5, 0.5, -0.5, 1.0 },
-            .{ 0.5, -0.5, 0.5, 1.0 },   .{ 0.5, -0.5, -0.5, 1.0 },  .{ 0.5, 0.5, -0.5, 1.0 },  .{ 0.5, 0.5, 0.5, 1.0 },
-            .{ -0.5, -0.5, -0.5, 1.0 }, .{ -0.5, -0.5, 0.5, 1.0 },  .{ -0.5, 0.5, 0.5, 1.0 },  .{ -0.5, 0.5, -0.5, 1.0 },
-            .{ -0.5, 0.5, 0.5, 1.0 },   .{ 0.5, 0.5, 0.5, 1.0 },    .{ 0.5, 0.5, -0.5, 1.0 },  .{ -0.5, 0.5, -0.5, 1.0 },
-            .{ -0.5, -0.5, -0.5, 1.0 }, .{ 0.5, -0.5, -0.5, 1.0 },  .{ 0.5, -0.5, 0.5, 1.0 },  .{ -0.5, -0.5, 0.5, 1.0 },
+            .{ -0.5, -0.5, 0.5, 1.0 },  .{ 0.5, -0.5, 0.5, 1.0 },
+            .{ 0.5, 0.5, 0.5, 1.0 },    .{ -0.5, 0.5, 0.5, 1.0 },
+            .{ 0.5, -0.5, -0.5, 1.0 },  .{ -0.5, -0.5, -0.5, 1.0 },
+            .{ -0.5, 0.5, -0.5, 1.0 },  .{ 0.5, 0.5, -0.5, 1.0 },
+            .{ 0.5, -0.5, 0.5, 1.0 },   .{ 0.5, -0.5, -0.5, 1.0 },
+            .{ 0.5, 0.5, -0.5, 1.0 },   .{ 0.5, 0.5, 0.5, 1.0 },
+            .{ -0.5, -0.5, -0.5, 1.0 }, .{ -0.5, -0.5, 0.5, 1.0 },
+            .{ -0.5, 0.5, 0.5, 1.0 },   .{ -0.5, 0.5, -0.5, 1.0 },
+            .{ -0.5, 0.5, 0.5, 1.0 },   .{ 0.5, 0.5, 0.5, 1.0 },
+            .{ 0.5, 0.5, -0.5, 1.0 },   .{ -0.5, 0.5, -0.5, 1.0 },
+            .{ -0.5, -0.5, -0.5, 1.0 }, .{ 0.5, -0.5, -0.5, 1.0 },
+            .{ 0.5, -0.5, 0.5, 1.0 },   .{ -0.5, -0.5, 0.5, 1.0 },
         },
-    ) catch unreachable;
+    ) catch |err| blk: {
+        std.log.warn("alloc failed: {}", .{err});
+        break :blk &.{};
+    };
 
     const normals = allocator.dupe(
         [4]f32,
@@ -418,7 +487,10 @@ fn createCubeData(allocator: std.mem.Allocator) CubeData {
             .{ 0, 1, 0, 0 },  .{ 0, 1, 0, 0 },  .{ 0, 1, 0, 0 },  .{ 0, 1, 0, 0 },
             .{ 0, -1, 0, 0 }, .{ 0, -1, 0, 0 }, .{ 0, -1, 0, 0 }, .{ 0, -1, 0, 0 },
         },
-    ) catch unreachable;
+    ) catch |err| blk: {
+        std.log.warn("alloc failed: {}", .{err});
+        break :blk &.{};
+    };
 
     const uvs = allocator.dupe(
         [2]f32,
@@ -430,7 +502,10 @@ fn createCubeData(allocator: std.mem.Allocator) CubeData {
             .{ 0, 1 }, .{ 1, 1 }, .{ 1, 0 }, .{ 0, 0 },
             .{ 0, 1 }, .{ 1, 1 }, .{ 1, 0 }, .{ 0, 0 },
         },
-    ) catch unreachable;
+    ) catch |err| blk: {
+        std.log.warn("alloc failed: {}", .{err});
+        break :blk &.{};
+    };
 
     const indices = allocator.dupe(
         u32,
@@ -442,7 +517,10 @@ fn createCubeData(allocator: std.mem.Allocator) CubeData {
             16, 17, 18, 16, 18, 19,
             20, 21, 22, 20, 22, 23,
         },
-    ) catch unreachable;
+    ) catch |err| blk: {
+        std.log.warn("alloc failed: {}", .{err});
+        break :blk &.{};
+    };
 
     return .{ .positions = positions, .normals = normals, .uvs = uvs, .indices = indices };
 }
@@ -466,19 +544,35 @@ fn createFullscreenQuad(allocator: std.mem.Allocator) FullscreenQuad {
             .{ .pos = .{ 1, 1, 0, 1 }, .uv = .{ 1, 1 } },
             .{ .pos = .{ -1, -1, 0, 1 }, .uv = .{ 0, 0 } },
         },
-    ) catch unreachable;
+    ) catch |err| blk: {
+        std.log.warn("alloc failed: {}", .{err});
+        break :blk &.{};
+    };
 
     const indices = allocator.dupe(
         u32,
         &[_]u32{ 0, 2, 1, 0, 1, 3 },
-    ) catch unreachable;
+    ) catch |err| blk: {
+        std.log.warn("alloc failed: {}", .{err});
+        break :blk &.{};
+    };
 
     return .{ .vertices = vertices, .indices = indices };
 }
 
-// ── G-buffer texture creation ────────────────────────────────
+// ── G-buffer texture creation ─────────────────────────
 
-fn createGbufferTextures(gpu: *noapi.Gpu, pool: *DescriptorPool, width: u32, height: u32, out_albedo: *noapi.Texture.OwnedTexture, out_normal: *noapi.Texture.OwnedTexture, out_mr: *noapi.Texture.OwnedTexture, out_depth: *noapi.Texture.OwnedTexture, samp_handle: u64) !void {
+fn createGbufferTextures(
+    gpu: *noapi.Gpu,
+    pool: *DescriptorPool,
+    width: u32,
+    height: u32,
+    out_albedo: *noapi.Texture.OwnedTexture,
+    out_normal: *noapi.Texture.OwnedTexture,
+    out_mr: *noapi.Texture.OwnedTexture,
+    out_depth: *noapi.Texture.OwnedTexture,
+    samp_handle: u64,
+) !void {
     const gb_desc: noapi.TextureDesc = .{
         .dimensions = .{ width, height, 1 },
         .format = .rgba8_unorm,
@@ -533,7 +627,6 @@ fn createSolidColorTexture(gpu: *noapi.Gpu, rgba: *const [4]u8) !noapi.Texture {
     cmd.copyToTexture(tex, staging, .{ .size = .{ 1, 1, 1 } });
     cmd.barrier(.{ .transfer = true }, .{ .fragment = true }, .{});
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
 
     return tex;
 }
@@ -624,11 +717,8 @@ fn loadEnvMap(gpa: std.mem.Allocator, io: Io, gpu: *noapi.Gpu, pool: *Descriptor
     cmd.copyToTexture(tex, staging, .{ .size = .{ width, height, 1 } });
     cmd.barrier(.{ .transfer = true }, .{ .fragment = true }, .{});
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
 
     // Allocate in descriptor heap
     const idx = pool.allocTexture(tex.handle, samp_handle, .@"2d");
     return idx;
 }
-
-

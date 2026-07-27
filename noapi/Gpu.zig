@@ -10,6 +10,7 @@ const Shader = @import("Shader.zig");
 const Semaphore = @import("Semaphore.zig");
 const Buffer = @import("Buffer.zig");
 const CommandBuffer = @import("CommandBuffer.zig");
+const TimestampQuerySet = @import("TimestampQuerySet.zig");
 const Texture = @import("Texture.zig");
 const DescriptorHeap = @import("DescriptorHeap.zig");
 
@@ -24,12 +25,10 @@ const BufferDesc = @import("Buffer.zig").BufferDesc;
 const TextureDesc = @import("Texture.zig").TextureDesc;
 const TextureViewDesc = @import("Texture.zig").TextureViewDesc;
 const SamplerDesc = @import("Texture.zig").SamplerDesc;
-const Vertex = @import("Vertex.zig");
-const Rect = @import("Rect.zig");
-const VertexBinding = @import("VertexInput.zig").VertexBinding;
-const VertexAttribute = @import("VertexInput.zig").VertexAttribute;
 
 const tracy = @import("tracy");
+
+const log = std.log.scoped(.gpu);
 
 pub const Gpu = @This();
 
@@ -39,10 +38,17 @@ pub const ShaderHandle = VkBackend.ShaderHandle;
 pub const SemaphoreHandle = VkBackend.SemaphoreHandle;
 pub const BufferHandle = VkBackend.BufferHandle;
 pub const QueueHandle = VkBackend.QueueHandle;
+pub const TimestampQueryHandle = VkBackend.TimestampQueryHandle;
+pub const DeviceIdentity = VkBackend.DeviceIdentity;
 
-backend: VkBackend,
+pub fn deviceIdentity(self: *const Gpu) DeviceIdentity {
+    return self.backend.deviceIdentity();
+}
+
+backend: *VkBackend,
 frames_in_flight: u5,
 frame_index: u5 = 0,
+allocator: std.mem.Allocator = std.heap.page_allocator,
 
 pub const Options = struct {
     frames_in_flight: u5 = 2,
@@ -55,6 +61,7 @@ pub const Options = struct {
     enable_nv_checkpoints: bool = false,
     enable_nv_diagnostics: bool = false,
     enable_device_fault: bool = false,
+    timestamp_queries: bool = false,
 };
 
 pub fn init(options: Options) !Gpu {
@@ -72,16 +79,19 @@ pub fn init(options: Options) !Gpu {
             .enable_nv_checkpoints = options.enable_nv_checkpoints,
             .enable_nv_diagnostics = options.enable_nv_diagnostics,
             .enable_device_fault = options.enable_device_fault,
+            .timestamp_queries = options.timestamp_queries,
         }),
         .frames_in_flight = options.frames_in_flight,
+        .allocator = options.allocator,
     };
 }
 
 pub fn deinit(self: *Gpu) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.backend.flushPendingFrees() catch {};
+    self.backend.flushPendingFrees() catch |err| log.warn("flushPendingFrees failed: {}", .{err});
     self.backend.deinit();
+    self.allocator.destroy(self.backend);
     self.* = undefined;
 }
 
@@ -100,15 +110,43 @@ pub fn commandsBegin(self: *Gpu) !CommandBuffer {
     return .{ .gpu = self, .handle = handle };
 }
 
-pub fn commandsEnd(self: *Gpu, cmd: CommandBuffer) void {
-    self.backend.commandsEnd(cmd.handle);
-}
-
 pub fn numSurfaces(self: *const Gpu) u32 {
     return self.backend.numWindows();
 }
 pub fn deviceLimits(self: *const Gpu) DeviceLimits {
     return self.backend.deviceLimits();
+}
+pub fn timestampInfo(self: *const Gpu) ?TimestampQuerySet.TimestampInfo {
+    return self.backend.timestampInfo();
+}
+
+pub fn timestampQuerySetCreate(self: *Gpu, count: u32) !TimestampQuerySet.TimestampQuerySet {
+    const handle = try self.backend.timestampQuerySetCreate(count);
+    return .{ .gpu = self, .handle = handle, .count = count };
+}
+
+pub fn timestampQuerySetDestroy(self: *Gpu, set: TimestampQuerySet.TimestampQuerySet) void {
+    self.backend.timestampQuerySetDestroy(set.handle);
+}
+
+pub fn timestampQuerySetRead(
+    self: *Gpu,
+    set: TimestampQuerySet.TimestampQuerySet,
+    first: u32,
+    out: []u64,
+) !void {
+    if (out.len > std.math.maxInt(u32)) return error.InvalidTimestampRange;
+    try TimestampQuerySet.validateQueryRange(set.count, first, @intCast(out.len));
+    try self.backend.timestampQuerySetRead(set.handle, first, out);
+}
+
+fn copyCommandBufferHandles(
+    cmd_bufs: []const CommandBuffer,
+    handles: *[64]CommandBufferHandle,
+) ![]CommandBufferHandle {
+    if (cmd_bufs.len > handles.len) return error.TooManyCommandBuffers;
+    for (cmd_bufs, 0..) |cb, i| handles[i] = cb.handle;
+    return handles[0..cmd_bufs.len];
 }
 
 // ── Handle types (opaque, mr_gpu style) ─────────────────────
@@ -191,10 +229,30 @@ pub fn semaphoreWait(self: *Gpu, sem: Semaphore, value: u64) !void {
 pub fn queueSubmit(self: *Gpu, cmd_bufs: []const CommandBuffer) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    var handles: [64]vk.CommandBuffer = undefined;
-    const count = @min(cmd_bufs.len, handles.len);
-    for (cmd_bufs[0..count], 0..) |cb, i| handles[i] = cb.handle;
-    try self.backend.queueSubmit(handles[0..count]);
+    var handles: [64]CommandBufferHandle = undefined;
+    const copied_handles = try copyCommandBufferHandles(cmd_bufs, &handles);
+    try self.backend.queueSubmit(copied_handles);
+}
+
+pub fn queueSubmitWaitSignal(
+    self: *Gpu,
+    cmd_bufs: []const CommandBuffer,
+    wait_sem: Semaphore,
+    wait_value: u64,
+    signal_sem: Semaphore,
+    signal_value: u64,
+) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+    var handles: [64]CommandBufferHandle = undefined;
+    const copied_handles = try copyCommandBufferHandles(cmd_bufs, &handles);
+    try self.backend.queueSubmitWaitSignal(
+        copied_handles,
+        wait_sem.handle,
+        wait_value,
+        signal_sem.handle,
+        signal_value,
+    );
 }
 
 pub fn descHeapCreate(self: *Gpu, texture_count: u32, texture_rw_count: u32, sampler_count: u32) !DescriptorHeap {
@@ -204,74 +262,6 @@ pub fn descHeapCreate(self: *Gpu, texture_count: u32, texture_rw_count: u32, sam
 pub fn descHeapDestroy(self: *Gpu, heap: DescriptorHeap) void {
     self.backend.descHeapDestroy(heap.index);
 }
-pub fn drawTriangles(
-    self: *Gpu,
-    cmd: CommandBuffer,
-    texture: ?TextureHandle,
-    vertices: []const Vertex,
-    indices: []const u32,
-    clip_rect: ?Rect,
-) void {
-    if (vertices.len == 0 or indices.len == 0) return;
-    const vert_bytes = @sizeOf(Vertex) * vertices.len;
-    const idx_bytes = @sizeOf(u32) * indices.len;
-    const buf = self.gpuMalloc(@intCast(vert_bytes + idx_bytes), 64, .default) catch return;
-
-    @memcpy(buf.cpu[0..vert_bytes], @as([*]const u8, @ptrCast(vertices.ptr))[0..vert_bytes]);
-    @memcpy(buf.cpu[vert_bytes..][0..idx_bytes], @as([*]const u8, @ptrCast(indices.ptr))[0..idx_bytes]);
-
-    const vk_buf: vk.Buffer = @enumFromInt(buf.vk_buffer);
-    const vert_off: u64 = 0;
-    const idx_off: u64 = vert_bytes;
-
-    const bindings = [_]VertexBinding{.{ .binding = 0, .stride = @sizeOf(Vertex), .input_rate = 0 }};
-    const attribs = [_]VertexAttribute{
-        .{
-            .location = 0,
-            .binding = 0,
-            .format = @intFromEnum(vk.Format.r32g32_sfloat),
-            .offset = @offsetOf(Vertex, "position"),
-        },
-        .{
-            .location = 1,
-            .binding = 0,
-            .format = @intFromEnum(vk.Format.r32g32_sfloat),
-            .offset = @offsetOf(Vertex, "uv"),
-        },
-        .{
-            .location = 2,
-            .binding = 0,
-            .format = @intFromEnum(vk.Format.r8g8b8a8_unorm),
-            .offset = @offsetOf(Vertex, "color"),
-        },
-    };
-    self.backend.cmdSetVertexInput(cmd.handle, &bindings, &attribs);
-    self.backend.cmdBindVertexBuffer(cmd.handle, 0, vk_buf, vert_off);
-    self.backend.cmdBindIndexBuffer(cmd.handle, vk_buf, idx_off, .u32);
-    if (clip_rect) |cr| {
-        self.backend.cmdSetScissor(cmd.handle, .{ .x = cr.x, .y = cr.y, .width = cr.w, .height = cr.h });
-    }
-    if (texture) |tex| {
-        if (tex.texture.id != 0) {
-            const heap = self.descHeapCreate(1, 0, 1) catch return;
-            defer self.descHeapDestroy(heap);
-            const tex_view = self.textureViewDescriptor(
-                tex,
-                .{ .format = .default },
-            );
-            const sampler = self.samplerDescriptor(.{
-                .min_filter = .linear,
-                .mag_filter = .linear,
-                .mip_filter = .linear,
-            });
-            self.descHeapSetTextures(heap, 0, &.{tex_view});
-            self.descHeapSetSamplers(heap, 0, &.{sampler});
-            self.backend.cmdBindDescriptorSets(cmd.handle, heap.index);
-        }
-    }
-    self.backend.cmdDrawIndexed(cmd.handle, @intCast(indices.len), 1, 0, 0);
-}
-
 pub fn generateMipmaps(self: *Gpu, cmd: CommandBuffer, texture: Texture) void {
     // Ensure any prior writes to the texture are visible to the first blit
     self.backend.cmdBarrier(cmd.handle, .{ .transfer = true }, .{ .transfer = true }, .{});
@@ -307,8 +297,43 @@ pub fn instanceHandle(self: *const Gpu) vk.Instance {
 // Basic types
 
 pub const FrameSchedule = struct { next_vblank_us: u32, swapchain_recreated: bool };
-pub const FrameResult = struct { gpu_blocked_ns: u64 };
-pub const PresentInfo = struct { blit_to_swapchain: bool = true };
+pub const FrameResult = struct {
+    gpu_blocked_ns: u64,
+    present_out_of_date: bool = false,
+};
+pub const PresentInfo = struct {
+    blit_to_swapchain: bool = true,
+    timing_id: ?u64 = null,
+};
+pub const PresentFeedback = struct {
+    present_id: u64,
+    actual_present_ns: u64,
+};
+
+test "task4 FrameResult defaults to a normal present" {
+    const result: FrameResult = .{ .gpu_blocked_ns = 0 };
+    try std.testing.expect(!result.present_out_of_date);
+}
+
+test "task4 submission wrapper accepts 64 and rejects 65 command buffers" {
+    var command_buffers: [65]CommandBuffer = undefined;
+    for (&command_buffers, 0..) |*command_buffer, index| {
+        command_buffer.* = .{
+            .gpu = undefined,
+            .handle = @enumFromInt(@as(u64, @intCast(index + 1))),
+        };
+    }
+
+    var handles: [64]CommandBufferHandle = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 64),
+        (try copyCommandBufferHandles(command_buffers[0..64], &handles)).len,
+    );
+    try std.testing.expectError(
+        error.TooManyCommandBuffers,
+        copyCommandBufferHandles(command_buffers[0..65], &handles),
+    );
+}
 
 test {
     std.testing.refAllDecls(@This());

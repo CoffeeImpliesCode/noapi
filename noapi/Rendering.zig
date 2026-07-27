@@ -1,3 +1,4 @@
+// zlint-disable unused-decls -- public API type, re-exported via root.zig
 //! Rendering attachment description for dynamic rendering.
 const std = @import("std");
 const TextureHandle = @import("TextureHandle.zig");

@@ -6,9 +6,7 @@ const std = @import("std");
 const common = @import("common");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
-const vk = noapi.vk;
 const DescriptorPool = noapi.DescriptorPool;
-const Io = std.Io;
 pub const tracy_impl = common.tracy_impl;
 pub const tracy = common.tracy;
 pub const tracy_options = common.tracy_options;
@@ -21,17 +19,33 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var app = try common.App.init(gpa, "noapi textures_advanced", window_width, window_height, 2, io);
+    var app = try common.App.init("noapi textures_advanced", gpa, io, window_width, window_height, 2, false);
     defer app.deinit();
     try app.sdl_win.show();
 
-    // ── Shaders ────────────────────────────────────────────
-    const cloud_vert = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/cloud_vert.spv", .vertex, "main", "cloud_vert");
+    // ── Shaders ────────────────────────────────
+    const cloud_vert = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/cloud_vert.spv",
+        .vertex,
+        "main",
+        "cloud_vert",
+    );
     defer cloud_vert.destroy();
-    const cloud_frag = try noapi.Shader.createFromPath(gpa, io, app.gpu, "shaders/cloud_frag.spv", .fragment, "main", "cloud_frag");
+    const cloud_frag = try noapi.Shader.createFromPath(
+        gpa,
+        io,
+        app.gpu,
+        "shaders/cloud_frag.spv",
+        .fragment,
+        "main",
+        "cloud_frag",
+    );
     defer cloud_frag.destroy();
 
-    // ── 3D cloud texture ──────────────────────────────────
+    // ── 3D cloud texture ─────────────────────────────
     // Generate procedural FBM noise volume on CPU
     const volume_bytes = volume_res * volume_res * volume_res;
     const cloud_data = try gpa.alloc(u8, volume_bytes);
@@ -45,11 +59,11 @@ pub fn main(init: std.process.Init) !void {
         .format = .r8_unorm,
         .usage = .{ .sampled = true },
     });
-    defer cloud_tex.freeAndDestroy();
+    defer cloud_tex.deinit();
 
     // Upload cloud data via staging buffer
     {
-        const staging = try common.gpuCreate(app.gpu, u8, cloud_data, 16);
+        const staging = try common.gpuCreate(u8, app.gpu, cloud_data, 16);
         defer app.gpu.gpuFree(staging);
 
         var cmd = try app.gpu.commandsBegin();
@@ -64,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
         try app.gpu.waitIdle();
     }
 
-    // ── Descriptor pool ────────────────────────────────────
+    // ── Descriptor pool ─────────────────────────────
     var pool = try DescriptorPool.init(app.gpu, 1, 0, 1);
     defer pool.deinit();
 
@@ -77,18 +91,13 @@ pub fn main(init: std.process.Init) !void {
         .address_mode_w = .clamp_to_edge,
     }), .@"3d");
 
-    // ── Render loop ────────────────────────────────────────
+    // ── Render loop ───────────────────────────────
     const win_id = try app.sdl_win.getId();
     var should_close = false;
-    var time_sec: f32 = 0;
     var sem_val: u64 = 0;
     const test_sem = try app.gpu.semaphoreCreate(0);
     defer app.gpu.semaphoreDestroy(test_sem);
-
-    // ── FPS counter ─────────────────────────────────────────
-    var fps_timer: u64 = sdl3.timer.getPerformanceCounter();
-    var fps_frames: u32 = 0;
-    const fps_freq: u64 = sdl3.timer.getPerformanceFrequency();
+    var timer = common.FrameTimer.init();
 
     while (!should_close) {
         // Process events
@@ -102,13 +111,16 @@ pub fn main(init: std.process.Init) !void {
                     if (ke.key == .escape) should_close = true;
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) app.surf.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (we.id == win_id) app.surf.notifyResize(.{
+                        .width = @intCast(we.width),
+                        .height = @intCast(we.height),
+                    });
                 },
                 else => {},
             }
         }
 
-        time_sec += 1.0 / 60.0;
+        timer.tick();
         _ = app.surf.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
@@ -124,30 +136,28 @@ pub fn main(init: std.process.Init) !void {
 
         // Orbit camera around the cloud (Z-up: XY horizontal, Z vertical)
         const radius: f32 = 2.5;
-        const cam_x = @sin(time_sec * 0.3) * radius;
-        const cam_y = @cos(time_sec * 0.3) * radius;
-        const cam_z = @sin(time_sec * 0.15) * 0.5;
+        const cam_x = @sin(timer.elapsed * 0.3) * radius;
+        const cam_y = @cos(timer.elapsed * 0.3) * radius;
+        const cam_z = @sin(timer.elapsed * 0.15) * 0.5;
 
-        // Pack push constant data: cloud_texture=0, cloud_sampler=0, camera_pos
-        const CloudPushData = extern struct {
-            cloud_texture: u32,
-            cloud_sampler: u32,
-            camera_x: f32,
-            camera_y: f32,
-            camera_z: f32,
-            _pad: u32,
+        // Pack push constant data: cloud_texture=0, cloud_sampler=0, camera_pos.
+        // The legacy cloud shaders read a 24-byte block {u32,u32,f32,f32,f32,u32} at
+        // offsets 0-23; map it onto the new 48-byte PushData by byte offset:
+        //   0-7:  cloud_texture/cloud_sampler -> vert_data (both 0: bindless slots)
+        //   8-15: camera_x, camera_y         -> frag_data
+        //   16-23: camera_z, _pad             -> indirect
+        const push: noapi.PushData = .{
+            .vert_data = 0,
+            .frag_data = (@as(u64, @as(u32, @bitCast(cam_y))) << 32) | @as(u64, @as(u32, @bitCast(cam_x))),
+            .indirect = @as(u64, @as(u32, @bitCast(cam_z))),
         };
-        const push_data: CloudPushData = .{
-            .cloud_texture = 0,
-            .cloud_sampler = 0,
-            .camera_x = cam_x,
-            .camera_y = cam_y,
-            .camera_z = cam_z,
-            ._pad = 0,
-        };
-        const push: noapi.PushData = @bitCast(push_data);
 
-        cmd.setViewport(.{ .x = 0, .y = 0, .width = @floatFromInt(surface_size.width), .height = @floatFromInt(surface_size.height) });
+        cmd.setViewport(.{
+            .x = 0,
+            .y = 0,
+            .width = @floatFromInt(surface_size.width),
+            .height = @floatFromInt(surface_size.height),
+        });
         cmd.setScissor(.{ .x = 0, .y = 0, .width = surface_size.width, .height = surface_size.height });
         cmd.setShaders(cloud_vert, cloud_frag);
         cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .back });
@@ -171,19 +181,7 @@ pub fn main(init: std.process.Init) !void {
 
         _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
 
-        // ── FPS output ──────────────────────────────────────
-        fps_frames += 1;
-        if (fps_frames == 60) {
-            const now = sdl3.timer.getPerformanceCounter();
-            const elapsed_ns = now - fps_timer;
-            const fps_numer: f64 = @floatFromInt(fps_freq * fps_frames);
-            const fps_denom: f64 = @floatFromInt(elapsed_ns);
-            const fps = fps_numer / fps_denom;
-            const ms = fps_denom / fps_numer * 1000.0;
-            std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
-            fps_timer = now;
-            fps_frames = 0;
-        }
+        timer.report();
     }
 
     try app.gpu.waitIdle();

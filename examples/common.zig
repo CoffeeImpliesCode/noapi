@@ -18,7 +18,7 @@ pub const tracy_options: tracy.Options = .{
     .manual_lifetime = false,
 };
 
-// ── SDL extension callback ──────────────────────────────
+// ── SDL extension callback ────────────────────────────
 // Gpu.init needs a callback to provide instance extensions.
 // Since Zig can't pass closures as function pointers, we keep
 // a module-level copy that platformInit sets and platformDeinit frees.
@@ -28,11 +28,70 @@ fn getExts() []const [*:0]const u8 {
     return exts_owned orelse &.{};
 }
 
-// ── Types ────────────────────────────────────────────────
+// ── Types ──────────────────────────────────
 pub const Vec3 = [3]f32;
 pub const Mat4 = [16]f32;
 
-// ── App ──────────────────────────────────────────────────
+// ── FrameTimer ────────────────────────────────
+/// Per-frame delta time + FPS reporting.
+pub const FrameTimer = struct {
+    fps_timer: u64,
+    fps_count: u32,
+    fps_freq: u64,
+    last_ts: u64,
+    delta: f32,
+    elapsed: f32,
+    max_dt: f32,
+
+    pub fn init() FrameTimer {
+        const now = sdl3.timer.getPerformanceCounter();
+        const freq = sdl3.timer.getPerformanceFrequency();
+        return .{
+            .fps_timer = now,
+            .fps_count = 0,
+            .fps_freq = freq,
+            .last_ts = now,
+            .delta = 0,
+            .elapsed = 0,
+            .max_dt = 1.0 / 10.0,
+        };
+    }
+
+    /// Set a custom max dt (default 1/10s).
+    pub fn initMax(max_dt: f32) FrameTimer {
+        var t = FrameTimer.init();
+        t.max_dt = max_dt;
+        return t;
+    }
+
+    /// Compute delta time since last tick, accumulate elapsed.
+    pub fn tick(self: *FrameTimer) void {
+        const now = sdl3.timer.getPerformanceCounter();
+        const raw = @as(f32, @floatCast(
+            @as(f64, @floatFromInt(now -| self.last_ts)) / @as(f64, @floatFromInt(self.fps_freq)),
+        ));
+        self.delta = @min(self.max_dt, raw);
+        self.elapsed += self.delta;
+        self.last_ts = now;
+    }
+
+    /// Print FPS every 60 frames.
+    pub fn report(self: *FrameTimer) void {
+        self.fps_count += 1;
+        if (self.fps_count == 60) {
+            const now = sdl3.timer.getPerformanceCounter();
+            const elapsed_ns = now - self.fps_timer;
+            const fps = @as(f64, @floatFromInt(self.fps_freq * self.fps_count)) / @as(f64, @floatFromInt(elapsed_ns));
+            const ms = @as(f64, @floatFromInt(elapsed_ns)) /
+                @as(f64, @floatFromInt(self.fps_freq * self.fps_count)) * 1000.0;
+            std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
+            self.fps_timer = now;
+            self.fps_count = 0;
+        }
+    }
+};
+
+// ── App ───────────────────────────────────
 /// Holds the full platform state created by App.init.
 /// Gpu is heap-allocated so the *Gpu pointer stored in Surface stays stable.
 pub const App = struct {
@@ -44,7 +103,15 @@ pub const App = struct {
     width: u32,
     height: u32,
 
-    pub fn init(allocator: std.mem.Allocator, comptime app_name: [:0]const u8, width: u32, height: u32, frames_in_flight: u5, io: Io) !App {
+    pub fn init(
+        comptime app_name: [:0]const u8,
+        allocator: std.mem.Allocator,
+        io: Io,
+        width: u32,
+        height: u32,
+        frames_in_flight: u5,
+        timestamp_queries: bool,
+    ) !App {
         // SDL3
         try sdl3.hints.set(.video_driver, "wayland");
         try sdl3.hints.set(.render_driver, "vulkan");
@@ -67,8 +134,7 @@ pub const App = struct {
 
         // GPU — heap-allocated so *Gpu pointer is stable across App moves
         const gpu = try allocator.create(noapi.Gpu);
-        errdefer allocator.destroy(gpu);
-        gpu.* = try noapi.Gpu.init(.{
+        gpu.* = noapi.Gpu.init(.{
             .frames_in_flight = frames_in_flight,
             .app_name = app_name,
             .validation = true,
@@ -78,7 +144,11 @@ pub const App = struct {
             },
             .io = io,
             .allocator = allocator,
-        });
+            .timestamp_queries = timestamp_queries,
+        }) catch |err| {
+            allocator.destroy(gpu);
+            return err;
+        };
         errdefer {
             gpu.deinit();
             allocator.destroy(gpu);
@@ -95,7 +165,7 @@ pub const App = struct {
             .extent = .{ .width = width, .height = height },
         });
 
-        return App{
+        return .{
             .gpu = gpu,
             .surf = surf,
             .sdl_win = win,
@@ -114,10 +184,11 @@ pub const App = struct {
         sdl3.quit(.{ .video = true, .events = true });
         if (exts_owned) |e| self.gpa.free(e);
         exts_owned = null;
+        self.* = undefined;
     }
 };
 
-// ── 3D Vector math ───────────────────────────────────────
+// ── 3D Vector math ───────────────────────────────
 
 pub fn cross(a: Vec3, b: Vec3) Vec3 {
     return .{
@@ -178,9 +249,9 @@ pub fn scale(s: f32) Mat4 {
 pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) Mat4 {
     const f = 1.0 / @tan(fov_y * 0.5);
     return .{
-        f / aspect, 0, 0, 0,
-        0,          f, 0, 0,
-        0,          0, -far / (far - near), -1,
+        f / aspect, 0, 0,                            0,
+        0,          f, 0,                            0,
+        0,          0, -far / (far - near),          -1,
         0,          0, -(far * near) / (far - near), 0,
     };
 }
@@ -193,10 +264,10 @@ pub fn lookAt(eye: Vec3, center: Vec3, up: Vec3) Mat4 {
     const cam_up = cross(right, fwd);
 
     return .{
-        right[0],                 cam_up[0],                 -fwd[0], 0,
-        right[1],                 cam_up[1],                 -fwd[1], 0,
-        right[2],                 cam_up[2],                 -fwd[2], 0,
-        -dot(right, eye), -dot(cam_up, eye),  dot(fwd, eye), 1,
+        right[0],         cam_up[0],         -fwd[0],       0,
+        right[1],         cam_up[1],         -fwd[1],       0,
+        right[2],         cam_up[2],         -fwd[2],       0,
+        -dot(right, eye), -dot(cam_up, eye), dot(fwd, eye), 1,
     };
 }
 
@@ -287,11 +358,11 @@ pub fn transpose(m: Mat4) Mat4 {
     };
 }
 
-// ── GPU upload helper ────────────────────────────────────
+// ── GPU upload helper ──────────────────────────────
 
 /// Allocate a GPU buffer of type `.default` and copy data into it.
 /// Returns the GpuPtr for the uploaded data.
-pub fn gpuCreate(gpu: *noapi.Gpu, comptime T: type, data: []const T, alignment: u29) !noapi.GpuPtr {
+pub fn gpuCreate(comptime T: type, gpu: *noapi.Gpu, data: []const T, alignment: u29) !noapi.GpuPtr {
     const size = data.len * @sizeOf(T);
     if (size == 0) return error.ZeroSize;
     const ptr = try gpu.gpuMalloc(size, alignment, .default);
@@ -299,23 +370,24 @@ pub fn gpuCreate(gpu: *noapi.Gpu, comptime T: type, data: []const T, alignment: 
     return ptr;
 }
 
-// ── PPM loader ───────────────────────────────────────────
+// ── PPM loader ────────────────────────────────
 
 /// Result of loading a PPM P6 file.
-pub const PPMData = struct {
+pub const PpmData = struct {
     data: []u8,
     width: u32,
     height: u32,
     allocator: std.mem.Allocator,
 
-    pub fn deinit(self: *PPMData) void {
+    pub fn deinit(self: *PpmData) void {
         self.allocator.free(self.data);
+        self.* = undefined;
     }
 };
 
 /// Load a binary PPM (P6) file. Returns raw RGB pixel data.
-/// The caller owns the returned memory (freed via PPMData.deinit).
-pub fn loadPPM(allocator: std.mem.Allocator, io: Io, path: []const u8) !PPMData {
+/// The caller owns the returned memory (freed via PpmData.deinit).
+pub fn loadPpm(allocator: std.mem.Allocator, io: Io, path: []const u8) !PpmData {
     const bytes = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     defer allocator.free(bytes);
 
@@ -357,8 +429,8 @@ pub fn loadPPM(allocator: std.mem.Allocator, io: Io, path: []const u8) !PPMData 
     const pixel_count = width * height * 3;
     if (pos + pixel_count > bytes.len) return error.InvalidPpm;
 
-    const data = try allocator.dupe(u8, bytes[pos..pos + pixel_count]);
-    return PPMData{
+    const data = try allocator.dupe(u8, bytes[pos .. pos + pixel_count]);
+    return .{
         .data = data,
         .width = width,
         .height = height,
