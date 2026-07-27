@@ -260,7 +260,7 @@ const ComputePushConstants = extern struct {
 
 pub fn init(options: Options) !VkBackend {
     const alloc = options.allocator;
-    var self = VkBackend{ .allocator = alloc, .io = options.io };
+    var self: VkBackend = .{ .allocator = alloc, .io = options.io };
     self.frames_in_flight = options.frames_in_flight;
     self.texture_view_cache = std.AutoHashMap(u64, vk.ImageView).init(alloc);
     self.sampler_cache = std.AutoHashMap(u64, vk.Sampler).init(alloc);
@@ -269,7 +269,7 @@ pub fn init(options: Options) !VkBackend {
     self.b = vk.BaseWrapper.load(get_proc_addr);
     log.info("Base wrapper loaded", .{});
 
-    const app_info = vk.ApplicationInfo{
+    const app_info: vk.ApplicationInfo = .{
         .p_application_name = if (options.app_name.len > 0) options.app_name else "noapi",
         .application_version = @bitCast(vk.makeApiVersion(0, 1, 0, 0)),
         .p_engine_name = "noapi",
@@ -306,13 +306,13 @@ pub fn init(options: Options) !VkBackend {
         break :blk &.{};
     };
 
-    var debug_messenger_ci = vk.DebugUtilsMessengerCreateInfoEXT{
+    var debug_messenger_ci: vk.DebugUtilsMessengerCreateInfoEXT = .{
         .pfn_user_callback = @ptrCast(&debugCallback),
         .message_type = .{ .general_bit_ext = true, .validation_bit_ext = true, .performance_bit_ext = true },
         .message_severity = .{ .warning_bit_ext = true, .error_bit_ext = true },
     };
 
-    const instance_ci = vk.InstanceCreateInfo{
+    const instance_ci: vk.InstanceCreateInfo = .{
         .p_application_info = &app_info,
         .pp_enabled_layer_names = enabled_layers.ptr,
         .enabled_layer_count = @intCast(enabled_layers.len),
@@ -401,16 +401,16 @@ pub fn init(options: Options) !VkBackend {
     }
     log.info("Queue family: {}", .{self.queue_family_index});
 
-    var features = DeviceFeatures{};
+    var features: DeviceFeatures = .{};
     features.init();
 
     const q_prio = [_]f32{1.0};
-    const queue_ci = vk.DeviceQueueCreateInfo{
+    const queue_ci: vk.DeviceQueueCreateInfo = .{
         .queue_family_index = self.queue_family_index,
         .p_queue_priorities = q_prio[0..].ptr,
         .queue_count = 1,
     };
-    const device_ci = vk.DeviceCreateInfo{
+    const device_ci: vk.DeviceCreateInfo = .{
         .p_next = @ptrCast(&features.vk10),
         .p_queue_create_infos = &.{queue_ci},
         .queue_create_info_count = 1,
@@ -448,15 +448,18 @@ pub fn init(options: Options) !VkBackend {
 
     // ── Descriptor set layouts (no_gfx_api pattern) ─────────
     {
-        const binding_flags = vk.DescriptorBindingFlags{ .update_after_bind_bit = true, .partially_bound_bit = true };
-        const flags = vk.DescriptorSetLayoutBindingFlagsCreateInfo{
+        const binding_flags: vk.DescriptorBindingFlags = .{
+            .update_after_bind_bit = true,
+            .partially_bound_bit = true,
+        };
+        const flags: vk.DescriptorSetLayoutBindingFlagsCreateInfo = .{
             .binding_count = 1,
             .p_binding_flags = @ptrCast(&binding_flags),
         };
         const binding_types = [_]vk.DescriptorType{ .sampled_image, .storage_image, .sampler };
         const binding_counts = [_]u32{ max_textures, max_textures, max_samplers };
         for (&binding_types, &binding_counts, 0..) |dtype, dcount, i| {
-            const bnd = vk.DescriptorSetLayoutBinding{
+            const bnd: vk.DescriptorSetLayoutBinding = .{
                 .binding = 0,
                 .descriptor_type = dtype,
                 .descriptor_count = dcount,
@@ -474,7 +477,7 @@ pub fn init(options: Options) !VkBackend {
 
     // ── Shared pipeline layouts (graphics + compute) ────────
     {
-        const pc_range_gfx = vk.PushConstantRange{
+        const pc_range_gfx: vk.PushConstantRange = .{
             .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
             .offset = 0,
             .size = @sizeOf(GraphicsPushConstants),
@@ -485,7 +488,7 @@ pub fn init(options: Options) !VkBackend {
             .set_layout_count = 3,
             .p_set_layouts = @ptrCast(&self.desc_layouts),
         }, null);
-        const pc_range_comp = vk.PushConstantRange{
+        const pc_range_comp: vk.PushConstantRange = .{
             .stage_flags = .{ .compute_bit = true },
             .offset = 0,
             .size = @sizeOf(ComputePushConstants),
@@ -523,7 +526,8 @@ pub fn flushPendingFrees(self: *VkBackend) void {
                 if (t.memory != .null_handle) self.device.freeMemory(t.memory, null);
             },
             .desc_heap => |d| {
-                self.device.freeDescriptorSets(d.pool, d.sets[0..]) catch |err| log.warn("flushPendingFrees: freeDescriptorSets failed: {}", .{err});
+                self.device.freeDescriptorSets(d.pool, d.sets[0..]) catch |err|
+                    log.warn("flushPendingFrees: freeDescriptorSets failed: {}", .{err});
                 self.device.destroyDescriptorPool(d.pool, null);
             },
         }
@@ -557,7 +561,8 @@ pub fn deinit(self: *VkBackend) void {
     // Destroy all descriptor heaps (skip invalid slots)
     for (self.desc_heaps.items) |dh| {
         if (!dh.valid) continue;
-        self.device.freeDescriptorSets(dh.pool, dh.sets[0..]) catch |err| log.warn("deinit: freeDescriptorSets failed: {}", .{err});
+        self.device.freeDescriptorSets(dh.pool, dh.sets[0..]) catch |err|
+            log.warn("deinit: freeDescriptorSets failed: {}", .{err});
         self.device.destroyDescriptorPool(dh.pool, null);
     }
     self.desc_heaps.deinit(self.allocator);
@@ -598,6 +603,7 @@ pub fn deinit(self: *VkBackend) void {
     if (self.debug_messenger != .null_handle)
         self.instance.destroyDebugUtilsMessengerEXT(self.debug_messenger, null);
     self.instance.destroyInstance(null);
+    self.* = undefined;
 }
 
 pub fn numWindows(self: *const VkBackend) u32 {
@@ -609,7 +615,12 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
     for (self.windows.items, 0..) |*w, i| {
         if (!w.valid) {
             log.info("addWindow: reusing tombstone slot {}", .{i});
-            w.* = Window{ .surface = surface, .extent = initial_extent, .requested_extent = initial_extent, .frames_in_flight = self.frames_in_flight };
+            w.* = Window{
+                .surface = surface,
+                .extent = initial_extent,
+                .requested_extent = initial_extent,
+                .frames_in_flight = self.frames_in_flight,
+            };
             try initPerFrameSemaphoreLists(self, w);
             try createSwapchainResources(self, w);
             try createPresentSemaphores(self, w);
@@ -627,7 +638,12 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
     }
     const idx = self.windows.items.len;
     log.info("addWindow: initPerFrameSemaphoreLists", .{});
-    var win = Window{ .surface = surface, .extent = initial_extent, .requested_extent = initial_extent, .frames_in_flight = self.frames_in_flight };
+    var win: Window = .{
+        .surface = surface,
+        .extent = initial_extent,
+        .requested_extent = initial_extent,
+        .frames_in_flight = self.frames_in_flight,
+    };
     try initPerFrameSemaphoreLists(self, &win);
     log.info("addWindow: createSwapchainResources", .{});
     try createSwapchainResources(self, &win);
@@ -665,7 +681,7 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
 
-    // ── Handle resize ───────────────────────────────────────────
+    // Handle resize
     if (win.needs_resize) {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
@@ -675,7 +691,12 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
             for (win.present_done_fences.items) |f| {
                 const zone_wf_resize = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
                 defer zone_wf_resize.end();
-                _ = self.device.waitForFences(&[_]vk.Fence{f}, .true, std.math.maxInt(u64)) catch |err| log.warn("beginFrame: waitForFences failed: {}", .{err});
+                _ = self.device.waitForFences(
+                    &[_]vk.Fence{f},
+                    .true,
+                    std.math.maxInt(u64),
+                ) catch |err|
+                    log.warn("beginFrame: waitForFences failed: {}", .{err});
             }
         } else {
             const zone_dwi_bf = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
@@ -693,7 +714,12 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     const recreated = blk: {
         const zone_acq = tracy.Zone.begin(.{ .name = "acquireImage", .src = @src(), .color = .tomato });
         defer zone_acq.end();
-        const acq = self.device.acquireNextImageKHR(win.swapchain, std.math.maxInt(u64), .null_handle, acq_fence) catch |e| {
+        const acq = self.device.acquireNextImageKHR(
+            win.swapchain,
+            std.math.maxInt(u64),
+            .null_handle,
+            acq_fence,
+        ) catch |e| {
             if (e == error.OutOfDateKHR) {
                 win.needs_resize = true;
                 return error.OutOfDateKHR;
@@ -715,15 +741,17 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     {
         const zone_rcp = tracy.Zone.begin(.{ .name = "resetCmdPool", .src = @src(), .color = .tomato });
         defer zone_rcp.end();
-        _ = self.device.resetCommandPool(win.cmd_pools.items[frame], .{}) catch |err| log.warn("beginFrame: resetCommandPool failed: {}", .{err});
+        _ = self.device.resetCommandPool(win.cmd_pools.items[frame], .{}) catch |err|
+            log.warn("beginFrame: resetCommandPool failed: {}", .{err});
     }
 
     self.flushPendingFrees();
 
     // Begin command buffer and transition UNDEFINED -> GENERAL
-    win.cmd_buffers.items[frame].beginCommandBuffer(&.{ .flags = .{ .one_time_submit_bit = true } }) catch |err| log.err("beginFrame: beginCommandBuffer failed: {}", .{err});
+    win.cmd_buffers.items[frame].beginCommandBuffer(&.{ .flags = .{ .one_time_submit_bit = true } }) catch |err|
+        log.err("beginFrame: beginCommandBuffer failed: {}", .{err});
     {
-        const barrier = vk.ImageMemoryBarrier2{
+        const barrier: vk.ImageMemoryBarrier2 = .{
             .image = win.images.items[win.image_index],
             .subresource_range = .{
                 .aspect_mask = .{ .color_bit = true },
@@ -752,7 +780,10 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
 
 pub fn currentSwapchainImage(self: *const VkBackend, window_index: u32) TextureHandle {
     const win = &self.windows.items[window_index];
-    return TextureHandle{ .tag = .swapchain, .swapchain = .{ .window_index = window_index, .image_index = win.image_index } };
+    return .{
+        .tag = .swapchain,
+        .swapchain = .{ .window_index = window_index, .image_index = win.image_index },
+    };
 }
 
 pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) FrameResult {
@@ -762,7 +793,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
 
     // Transition GENERAL -> PRESENT_SRC_KHR
     {
-        const barrier = vk.ImageMemoryBarrier2{
+        const barrier: vk.ImageMemoryBarrier2 = .{
             .image = win.images.items[img_idx],
             .subresource_range = .{
                 .aspect_mask = .{ .color_bit = true },
@@ -786,7 +817,8 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
         });
     }
 
-    win.cmd_buffers.items[frame].endCommandBuffer() catch |err| log.err("endFrame: endCommandBuffer failed: {}", .{err});
+    win.cmd_buffers.items[frame].endCommandBuffer() catch |err|
+        log.err("endFrame: endCommandBuffer failed: {}", .{err});
 
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
@@ -806,7 +838,11 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
     stage_mask_buf[wc] = .{ .all_commands_bit = true };
     wc += 1;
     const wait_count = @min(win.wait_sems.items[frame].items.len, 16 - wc);
-    for (win.wait_sems.items[frame].items[0..wait_count], win.wait_values.items[frame].items[0..wait_count], wc..) |s, v, i| {
+    for (
+        win.wait_sems.items[frame].items[0..wait_count],
+        win.wait_values.items[frame].items[0..wait_count],
+        wc..,
+    ) |s, v, i| {
         wait_sems_buf[i] = s;
         wait_vals_buf[i] = v;
         stage_mask_buf[i] = .{ .all_commands_bit = true };
@@ -824,13 +860,17 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
     signal_vals_buf[sc] = 0;
     sc += 1;
     const signal_count = @min(win.signal_sems.items[frame].items.len, 16 - sc);
-    for (win.signal_sems.items[frame].items[0..signal_count], win.signal_values.items[frame].items[0..signal_count], sc..) |s, v, i| {
+    for (
+        win.signal_sems.items[frame].items[0..signal_count],
+        win.signal_values.items[frame].items[0..signal_count],
+        sc..,
+    ) |s, v, i| {
         signal_sems_buf[i] = s;
         signal_vals_buf[i] = v;
         sc += 1;
     }
 
-    const ts_info = vk.TimelineSemaphoreSubmitInfo{
+    const ts_info: vk.TimelineSemaphoreSubmitInfo = .{
         .wait_semaphore_value_count = wc,
         .p_wait_semaphore_values = &wait_vals_buf,
         .signal_semaphore_value_count = sc,
@@ -869,8 +909,14 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
                 // Wait for this frame's previous present to complete
                 const zone_wf_p = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
                 defer zone_wf_p.end();
-                _ = self.device.waitForFences(&[_]vk.Fence{pfence}, .true, std.math.maxInt(u64)) catch |err| log.warn("present: waitForFences failed: {}", .{err});
-                self.device.resetFences(&[_]vk.Fence{pfence}) catch |err| log.warn("present: resetFences failed: {}", .{err});
+                _ = self.device.waitForFences(
+                    &[_]vk.Fence{pfence},
+                    .true,
+                    std.math.maxInt(u64),
+                ) catch |err|
+                    log.warn("present: waitForFences failed: {}", .{err});
+                self.device.resetFences(&[_]vk.Fence{pfence}) catch |err|
+                    log.warn("present: resetFences failed: {}", .{err});
                 fence_info = .{ .swapchain_count = 1, .p_fences = @ptrCast(&pfence) };
                 break :blk vk.PresentInfoKHR{
                     .p_next = @ptrCast(&fence_info),
@@ -922,14 +968,15 @@ pub fn waitIdle(self: *VkBackend) void {
 }
 
 pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) void {
-    for (handles) |h| self.device.endCommandBuffer(h) catch |err| log.warn("queueSubmit: endCommandBuffer failed: {}", .{err});
+    for (handles) |h| self.device.endCommandBuffer(h) catch |err|
+        log.warn("queueSubmit: endCommandBuffer failed: {}", .{err});
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
     const fence = self.device.createFence(&.{}, null) catch |err| {
         log.warn("queueSubmit: createFence failed: {}", .{err});
         return;
     };
-    const si = vk.SubmitInfo{
+    const si: vk.SubmitInfo = .{
         .command_buffer_count = @intCast(handles.len),
         .p_command_buffers = handles.ptr,
     };
@@ -955,15 +1002,20 @@ pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) void 
     };
 }
 
-pub fn queueSubmitSignal(self: *VkBackend, handles: []const CommandBufferHandle, sem: SemaphoreHandle, value: u64) void {
+pub fn queueSubmitSignal(
+    self: *VkBackend,
+    handles: []const CommandBufferHandle,
+    sem: SemaphoreHandle,
+    value: u64,
+) void {
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
-    const ts = vk.TimelineSemaphoreSubmitInfo{
+    const ts: vk.TimelineSemaphoreSubmitInfo = .{
         .signal_semaphore_value_count = 1,
         .p_signal_semaphore_values = @ptrCast(&value),
     };
     const sems = [_]vk.Semaphore{sem};
-    const si = vk.SubmitInfo{
+    const si: vk.SubmitInfo = .{
         .p_next = @ptrCast(&ts),
         .command_buffer_count = @intCast(handles.len),
         .p_command_buffers = handles.ptr,
@@ -1029,10 +1081,18 @@ pub fn shaderCreate(self: *VkBackend, spv: []const u32, stage: u2, entry: [:0]co
     };
     const next_stage: vk.ShaderStageFlags = if (vk_stage.vertex_bit) .{ .fragment_bit = true } else .{};
     const pc_range = switch (stage) {
-        2 => vk.PushConstantRange{ .stage_flags = .{ .compute_bit = true }, .offset = 0, .size = @sizeOf(ComputePushConstants) },
-        else => vk.PushConstantRange{ .stage_flags = .{ .vertex_bit = true, .fragment_bit = true }, .offset = 0, .size = @sizeOf(GraphicsPushConstants) },
+        2 => vk.PushConstantRange{
+            .stage_flags = .{ .compute_bit = true },
+            .offset = 0,
+            .size = @sizeOf(ComputePushConstants),
+        },
+        else => vk.PushConstantRange{
+            .stage_flags = .{ .vertex_bit = true, .fragment_bit = true },
+            .offset = 0,
+            .size = @sizeOf(GraphicsPushConstants),
+        },
     };
-    const ci = vk.ShaderCreateInfoEXT{
+    const ci: vk.ShaderCreateInfoEXT = .{
         .code_type = .spirv_ext,
         .code_size = spv.len * @sizeOf(u32),
         .p_code = @ptrCast(spv.ptr),
@@ -1057,7 +1117,7 @@ pub fn shaderDestroy(self: *VkBackend, shader: ShaderHandle) void {
     self.device.destroyShaderEXT(shader, null);
 }
 
-// ── Semaphore methods ─────────────────────────────────────────
+// Semaphore methods
 pub fn semaphoreCreate(self: *VkBackend, initial_value: u64) !SemaphoreHandle {
     return self.device.createSemaphore(
         &.{ .p_next = @constCast(&vk.SemaphoreTypeCreateInfo{
@@ -1102,7 +1162,7 @@ pub fn cmdSetRasterState(self: *VkBackend, cmd: CommandBufferHandle, state: Rast
 pub fn cmdSetBlendState(self: *VkBackend, cmd: CommandBufferHandle, state: BlendState) void {
     const enable = if (state.enable) @as(vk.Bool32, .true) else @as(vk.Bool32, .false);
     self.device.cmdSetColorBlendEnableEXT(cmd, 0, @as([]const vk.Bool32, &.{enable}));
-    const eq = vk.ColorBlendEquationEXT{
+    const eq: vk.ColorBlendEquationEXT = .{
         .src_color_blend_factor = @as(vk.BlendFactor, @enumFromInt(@intFromEnum(state.src_color_factor))),
         .dst_color_blend_factor = @as(vk.BlendFactor, @enumFromInt(@intFromEnum(state.dst_color_factor))),
         .color_blend_op = @as(vk.BlendOp, @enumFromInt(@intFromEnum(state.color_op))),
@@ -1121,7 +1181,7 @@ pub fn cmdSetBlendEnable(self: *VkBackend, cmd: CommandBufferHandle, enable: boo
 }
 
 pub fn cmdSetViewport(self: *VkBackend, cmd: CommandBufferHandle, vp: Viewport) void {
-    const vk_vp = vk.Viewport{
+    const vk_vp: vk.Viewport = .{
         .x = vp.x,
         .y = vp.y,
         .width = vp.width,
@@ -1133,19 +1193,33 @@ pub fn cmdSetViewport(self: *VkBackend, cmd: CommandBufferHandle, vp: Viewport) 
 }
 
 pub fn cmdSetScissor(self: *VkBackend, cmd: CommandBufferHandle, sc: Scissor) void {
-    const vk_sc = vk.Rect2D{ .offset = .{ .x = sc.x, .y = sc.y }, .extent = .{ .width = sc.width, .height = sc.height } };
+    const vk_sc: vk.Rect2D = .{
+        .offset = .{ .x = sc.x, .y = sc.y },
+        .extent = .{ .width = sc.width, .height = sc.height },
+    };
     self.device.cmdSetScissorWithCount(cmd, &.{vk_sc});
 }
 
 pub fn cmdPushConstantsGraphics(self: *VkBackend, cmd: CommandBufferHandle, data: PushData) void {
-    self.device.cmdPushConstants(cmd, self.pipeline_layout_graphics, .{ .vertex_bit = true, .fragment_bit = true }, 0, @sizeOf(PushData), @ptrCast(&data));
+    self.device.cmdPushConstants(cmd, self.pipeline_layout_graphics, .{
+        .vertex_bit = true,
+        .fragment_bit = true,
+    }, 0, @sizeOf(PushData), @ptrCast(&data));
 }
 
 pub fn cmdPushConstantsCompute(self: *VkBackend, cmd: CommandBufferHandle, data: u64) void {
-    self.device.cmdPushConstants(cmd, self.pipeline_layout_compute, .{ .compute_bit = true }, 0, @sizeOf(u64), @ptrCast(&data));
+    self.device.cmdPushConstants(cmd, self.pipeline_layout_compute, .{
+        .compute_bit = true,
+    }, 0, @sizeOf(u64), @ptrCast(&data));
 }
 
-pub fn cmdBindIndexBuffer(self: *VkBackend, cmd: CommandBufferHandle, buf: BufferHandle, offset: u64, fmt: IndexFormat) void {
+pub fn cmdBindIndexBuffer(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    buf: BufferHandle,
+    offset: u64,
+    fmt: IndexFormat,
+) void {
     self.device.cmdBindIndexBuffer(cmd, buf, offset, @as(vk.IndexType, @enumFromInt(@intFromEnum(fmt))));
 }
 
@@ -1153,19 +1227,48 @@ pub fn cmdDraw(self: *VkBackend, cmd: CommandBufferHandle, vertex_count: u32, in
     self.device.cmdDraw(cmd, vertex_count, instance_count, 0, 0);
 }
 
-pub fn cmdDrawIndexed(self: *VkBackend, cmd: CommandBufferHandle, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32) void {
+pub fn cmdDrawIndexed(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+) void {
     self.device.cmdDrawIndexed(cmd, index_count, instance_count, first_index, vertex_offset, 0);
 }
 
-pub fn cmdDrawIndexedIndirect(self: *VkBackend, cmd: CommandBufferHandle, buffer: BufferHandle, offset: u64, draw_count: u32, stride: u32) void {
+pub fn cmdDrawIndexedIndirect(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    buffer: BufferHandle,
+    offset: u64,
+    draw_count: u32,
+    stride: u32,
+) void {
     self.device.cmdDrawIndexedIndirect(cmd, buffer, offset, draw_count, stride);
 }
 
-pub fn cmdDrawIndexedIndirectMulti(self: *VkBackend, cmd: CommandBufferHandle, buffer: BufferHandle, offset: u64, stride: u32, count_buffer: BufferHandle, count_offset: u64, max_draws: u32) void {
+pub fn cmdDrawIndexedIndirectMulti(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    buffer: BufferHandle,
+    offset: u64,
+    stride: u32,
+    count_buffer: BufferHandle,
+    count_offset: u64,
+    max_draws: u32,
+) void {
     self.device.cmdDrawIndexedIndirectCount(cmd, buffer, offset, count_buffer, count_offset, max_draws, stride);
 }
 
-pub fn cmdDispatch(self: *VkBackend, cmd: CommandBufferHandle, group_count_x: u32, group_count_y: u32, group_count_z: u32) void {
+pub fn cmdDispatch(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    group_count_x: u32,
+    group_count_y: u32,
+    group_count_z: u32,
+) void {
     self.device.cmdDispatch(cmd, group_count_x, group_count_y, group_count_z);
 }
 
@@ -1216,7 +1319,7 @@ pub fn cmdBarrier(self: *VkBackend, cmd: CommandBufferHandle, before: Stage, aft
             dst_access.depth_stencil_attachment_write_bit = true;
         }
     }
-    const barrier = vk.MemoryBarrier2{
+    const barrier: vk.MemoryBarrier2 = .{
         .src_stage_mask = src_stage,
         .src_access_mask = src_access,
         .dst_stage_mask = dst_stage,
@@ -1298,7 +1401,7 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
         const depth_format = self.textures.items[depth.texture.texture.id - 1].format;
         self.last_depth_image = depth_image;
         self.last_depth_format = depth_format;
-        const depth_barrier = vk.ImageMemoryBarrier2{
+        const depth_barrier: vk.ImageMemoryBarrier2 = .{
             .image = depth_image,
             .subresource_range = .{
                 .aspect_mask = imageAspect(depth_format),
@@ -1314,9 +1417,15 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
             .src_stage_mask = .{ .all_commands_bit = true },
             .src_access_mask = .{ .memory_write_bit = true },
             .dst_stage_mask = .{ .early_fragment_tests_bit = true },
-            .dst_access_mask = .{ .depth_stencil_attachment_read_bit = true, .depth_stencil_attachment_write_bit = true },
+            .dst_access_mask = .{
+                .depth_stencil_attachment_read_bit = true,
+                .depth_stencil_attachment_write_bit = true,
+            },
         };
-        self.device.cmdPipelineBarrier2(cmd, &.{ .image_memory_barrier_count = 1, .p_image_memory_barriers = @ptrCast(&depth_barrier) });
+        self.device.cmdPipelineBarrier2(cmd, &.{
+            .image_memory_barrier_count = 1,
+            .p_image_memory_barriers = @ptrCast(&depth_barrier),
+        });
     }
 
     var stencil_ci: vk.RenderingAttachmentInfo = undefined;
@@ -1335,7 +1444,10 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
     }
 
     self.device.cmdBeginRendering(cmd, &.{
-        .render_area = .{ .offset = .{ .x = desc.render_area_offset[0], .y = desc.render_area_offset[1] }, .extent = .{ .width = width, .height = height } },
+        .render_area = .{
+            .offset = .{ .x = desc.render_area_offset[0], .y = desc.render_area_offset[1] },
+            .extent = .{ .width = width, .height = height },
+        },
         .layer_count = if (desc.layer_count != 0) desc.layer_count else 1,
         .view_mask = desc.view_mask,
         .color_attachment_count = color_attach_count,
@@ -1381,9 +1493,16 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
         }};
         self.device.cmdSetColorBlendEquationEXT(cmd, 0, &blend_eq);
     }
-    const viewport = vk.Viewport{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 };
+    const viewport: vk.Viewport = .{
+        .x = 0,
+        .y = 0,
+        .width = @floatFromInt(width),
+        .height = @floatFromInt(height),
+        .min_depth = 0,
+        .max_depth = 1,
+    };
     self.device.cmdSetViewportWithCount(cmd, &.{viewport});
-    const scissor = vk.Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = width, .height = height } };
+    const scissor: vk.Rect2D = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = width, .height = height } };
     self.device.cmdSetScissorWithCount(cmd, &.{scissor});
 }
 
@@ -1391,7 +1510,7 @@ pub fn cmdEndRendering(self: *VkBackend, cmd: CommandBufferHandle) void {
     self.device.cmdEndRendering(cmd);
     // Reverse depth barrier: DEPTH_STENCIL_ATTACHMENT_OPTIMAL → GENERAL
     if (self.last_depth_image != .null_handle) {
-        const depth_barrier = vk.ImageMemoryBarrier2{
+        const depth_barrier: vk.ImageMemoryBarrier2 = .{
             .image = self.last_depth_image,
             .subresource_range = .{
                 .aspect_mask = imageAspect(self.last_depth_format),
@@ -1409,7 +1528,10 @@ pub fn cmdEndRendering(self: *VkBackend, cmd: CommandBufferHandle) void {
             .dst_stage_mask = .{ .all_commands_bit = true },
             .dst_access_mask = .{},
         };
-        self.device.cmdPipelineBarrier2(cmd, &.{ .image_memory_barrier_count = 1, .p_image_memory_barriers = @ptrCast(&depth_barrier) });
+        self.device.cmdPipelineBarrier2(cmd, &.{
+            .image_memory_barrier_count = 1,
+            .p_image_memory_barriers = @ptrCast(&depth_barrier),
+        });
         self.last_depth_image = .null_handle;
     }
 }
@@ -1428,14 +1550,18 @@ pub fn cmdEndDebugLabel(self: *VkBackend, cmd: CommandBufferHandle) void {
 pub fn cmdAddWaitSemaphore(self: *VkBackend, window_index: u32, sem: SemaphoreHandle, value: u64) void {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
-    win.wait_sems.items[frame].append(self.allocator, sem) catch |e| log.warn("cmdAddWaitSemaphore: append failed: {}", .{e});
-    win.wait_values.items[frame].append(self.allocator, value) catch |e| log.warn("cmdAddWaitSemaphore: append value failed: {}", .{e});
+    win.wait_sems.items[frame].append(self.allocator, sem) catch |e|
+        log.warn("cmdAddWaitSemaphore: append failed: {}", .{e});
+    win.wait_values.items[frame].append(self.allocator, value) catch |e|
+        log.warn("cmdAddWaitSemaphore: append value failed: {}", .{e});
 }
 pub fn cmdAddSignalSemaphore(self: *VkBackend, window_index: u32, sem: SemaphoreHandle, value: u64) void {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
-    win.signal_sems.items[frame].append(self.allocator, sem) catch |e| log.warn("cmdAddSignalSemaphore: append failed: {}", .{e});
-    win.signal_values.items[frame].append(self.allocator, value) catch |e| log.warn("cmdAddSignalSemaphore: append value failed: {}", .{e});
+    win.signal_sems.items[frame].append(self.allocator, sem) catch |e|
+        log.warn("cmdAddSignalSemaphore: append failed: {}", .{e});
+    win.signal_values.items[frame].append(self.allocator, value) catch |e|
+        log.warn("cmdAddSignalSemaphore: append value failed: {}", .{e});
 }
 pub fn cmdBindDescriptorSets(self: *VkBackend, cmd: CommandBufferHandle, heap: u32) void {
     if (heap < self.desc_heaps.items.len) {
@@ -1462,7 +1588,10 @@ pub fn notifyResize(self: *VkBackend, window_index: u32, size: Extent2D) void {
                 log.info("notifyResize: setting needs_resize (size={}x{})", .{ size.width, size.height });
                 win.needs_resize = true;
             } else {
-                log.info("notifyResize: deferring (size={}x{}, throttle={})", .{ size.width, size.height, win.resize_throttle });
+                log.info(
+                    "notifyResize: deferring (size={}x{}, throttle={})",
+                    .{ size.width, size.height, win.resize_throttle },
+                );
             }
         }
     }
@@ -1475,7 +1604,12 @@ fn recreateSwapchain(self: *VkBackend, win: *Window) !void {
         for (win.present_done_fences.items) |f| {
             const zone_wf_rs = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
             defer zone_wf_rs.end();
-            _ = self.device.waitForFences(&[_]vk.Fence{f}, .true, std.math.maxInt(u64)) catch |err| log.warn("recreateSwapchain: waitForFences failed: {}", .{err});
+            _ = self.device.waitForFences(
+                &[_]vk.Fence{f},
+                .true,
+                std.math.maxInt(u64),
+            ) catch |err|
+                log.warn("recreateSwapchain: waitForFences failed: {}", .{err});
         }
     } else {
         // deviceWaitIdle: Khronos-recommended workaround for spec bug #1678.
@@ -1513,7 +1647,10 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     var extent = caps.current_extent;
     if (extent.width == 0xFFFFFFFF or extent.width == 0) {
         extent.width = @max(caps.min_image_extent.width, @min(win.requested_extent.width, caps.max_image_extent.width));
-        extent.height = @max(caps.min_image_extent.height, @min(win.requested_extent.height, caps.max_image_extent.height));
+        extent.height = @max(
+            caps.min_image_extent.height,
+            @min(win.requested_extent.height, caps.max_image_extent.height),
+        );
     }
     win.extent = .{ .width = extent.width, .height = extent.height }; // actual extent
 
@@ -1530,7 +1667,11 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     win.swapchain_format = chosen_format.format;
 
     // Present modes
-    const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.physical_device, win.surface, alloc);
+    const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(
+        self.physical_device,
+        win.surface,
+        alloc,
+    );
     defer alloc.free(present_modes);
     var chosen_present = vk.PresentModeKHR.fifo_khr;
     for (present_modes) |pm| {
@@ -1541,7 +1682,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     }
 
     // Hand the surface to the device for swapchain maintenance
-    const swapchain_ci = vk.SwapchainCreateInfoKHR{
+    const swapchain_ci: vk.SwapchainCreateInfoKHR = .{
         .surface = win.surface,
         .min_image_count = caps.min_image_count + 1,
         .image_format = chosen_format.format,
@@ -1695,7 +1836,12 @@ fn destroyWindow(self: *VkBackend, win: *Window) void {
     }
 }
 
-fn debugCallback(severity: vk.DebugUtilsMessageSeverityFlagsEXT, msg_type: vk.DebugUtilsMessageTypeFlagsEXT, data: [*c]const vk.DebugUtilsMessengerCallbackDataEXT, user_data: ?*anyopaque) callconv(vk.vulkan_call_conv) vk.Bool32 {
+fn debugCallback(
+    severity: vk.DebugUtilsMessageSeverityFlagsEXT,
+    msg_type: vk.DebugUtilsMessageTypeFlagsEXT,
+    data: [*c]const vk.DebugUtilsMessengerCallbackDataEXT,
+    user_data: ?*anyopaque,
+) callconv(vk.vulkan_call_conv) vk.Bool32 {
     _ = user_data;
     const prefix = if (severity.error_bit_ext) "ERROR" else if (severity.warning_bit_ext) "WARN" else "INFO";
     const tag = if (msg_type.validation_bit_ext) "VAL" else if (msg_type.performance_bit_ext) "PERF" else "GEN";
@@ -1794,9 +1940,9 @@ fn imageAspect(vk_format: vk.Format) vk.ImageAspectFlags {
     };
 }
 
-// ── Texture methods ────────────────────────────────────────────
+// ── Texture methods ─────────────────────
 pub fn textureSizeAndAlign(self: *VkBackend, desc: TextureDesc) struct { size: u64, alignment: u64 } {
-    const img_info = vk.ImageCreateInfo{
+    const img_info: vk.ImageCreateInfo = .{
         .image_type = toVkImageType(desc.type),
         .format = toVkFormat(desc.format),
         .extent = .{ .width = desc.dimensions[0], .height = desc.dimensions[1], .depth = desc.dimensions[2] },
@@ -1823,7 +1969,7 @@ pub fn textureSizeAndAlign(self: *VkBackend, desc: TextureDesc) struct { size: u
 }
 pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue_index: u32) !TextureHandle {
     _ = queue_index;
-    const img_info = vk.ImageCreateInfo{
+    const img_info: vk.ImageCreateInfo = .{
         .image_type = toVkImageType(desc.type),
         .format = toVkFormat(desc.format),
         .extent = .{ .width = desc.dimensions[0], .height = desc.dimensions[1], .depth = desc.dimensions[2] },
@@ -1856,7 +2002,11 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
         } else return error.OutOfMemory;
     } else blk: {
         const mem_reqs = self.device.getImageMemoryRequirements(image);
-        const mem_type_idx = findMemoryType(self, mem_reqs.memory_type_bits, .{ .device_local_bit = true }) orelse return error.OutOfMemory;
+        const mem_type_idx = findMemoryType(
+            self,
+            mem_reqs.memory_type_bits,
+            .{ .device_local_bit = true },
+        ) orelse return error.OutOfMemory;
         break :blk try self.device.allocateMemory(&.{
             .allocation_size = mem_reqs.size,
             .memory_type_index = mem_type_idx,
@@ -1881,7 +2031,7 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
         try self.device.beginCommandBuffer(cb, &.{ .flags = .{ .one_time_submit_bit = true } });
         {
             const aspect = imageAspect(toVkFormat(desc.format));
-            const barrier = vk.ImageMemoryBarrier2{
+            const barrier: vk.ImageMemoryBarrier2 = .{
                 .image = image,
                 .subresource_range = .{
                     .aspect_mask = aspect,
@@ -1921,7 +2071,7 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
         }
     }
 
-    const view_info = vk.ImageViewCreateInfo{
+    const view_info: vk.ImageViewCreateInfo = .{
         .image = image,
         .view_type = toVkImageViewType(desc.type),
         .format = toVkFormat(desc.format),
@@ -1937,8 +2087,17 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
     const default_view = try self.device.createImageView(&view_info, null);
     errdefer self.device.destroyImageView(default_view, null);
 
-    try self.textures.append(self.allocator, .{ .image = image, .default_view = default_view, .memory = if (owned_memory) image_memory else .null_handle, .format = toVkFormat(desc.format), .width = desc.dimensions[0], .height = desc.dimensions[1], .depth = desc.dimensions[2], .mip_levels = desc.mip_count });
-    return TextureHandle{ .tag = .texture, .texture = .{ .id = @intCast(self.textures.items.len), .birth_frame = 0 } };
+    try self.textures.append(self.allocator, .{
+        .image = image,
+        .default_view = default_view,
+        .memory = if (owned_memory) image_memory else .null_handle,
+        .format = toVkFormat(desc.format),
+        .width = desc.dimensions[0],
+        .height = desc.dimensions[1],
+        .depth = desc.dimensions[2],
+        .mip_levels = desc.mip_count,
+    });
+    return .{ .tag = .texture, .texture = .{ .id = @intCast(self.textures.items.len), .birth_frame = 0 } };
 }
 
 /// Resolve TextureHandle to vk.Image.
@@ -1997,7 +2156,8 @@ pub fn textureDestroy(self: *VkBackend, tex: TextureHandle) void {
         while (it.next()) |entry| {
             if (entry.key_ptr.* >> 32 == t.id) {
                 self.device.destroyImageView(entry.value_ptr.*, null);
-                keys_to_remove.append(self.allocator, entry.key_ptr.*) catch |err| log.warn("textureCleanup: append failed: {}", .{err});
+                keys_to_remove.append(self.allocator, entry.key_ptr.*) catch |err|
+                    log.warn("textureCleanup: append failed: {}", .{err});
             }
         }
         for (keys_to_remove.items) |key| {
@@ -2041,7 +2201,7 @@ pub fn textureViewDescriptor(self: *VkBackend, tex: TextureHandle, view_desc: Te
 
     // Cache miss — create new view
     const vk_format = if (view_desc.format == .default) ti.format else toVkFormat(view_desc.format);
-    const view_info = vk.ImageViewCreateInfo{
+    const view_info: vk.ImageViewCreateInfo = .{
         .image = ti.image,
         .view_type = toVkImageViewType(view_desc.type),
         .format = vk_format,
@@ -2086,7 +2246,7 @@ pub fn samplerDescriptor(self: *VkBackend, desc: SamplerDesc) u64 {
     }
 
     // Cache miss — create new sampler
-    const sampler_info = vk.SamplerCreateInfo{
+    const sampler_info: vk.SamplerCreateInfo = .{
         .mag_filter = toVkFilter(desc.mag_filter),
         .min_filter = toVkFilter(desc.min_filter),
         .mipmap_mode = if (desc.mip_filter == .linear) .linear else .nearest,
@@ -2111,7 +2271,7 @@ pub fn samplerDescriptor(self: *VkBackend, desc: SamplerDesc) u64 {
     return @intFromEnum(s);
 }
 
-// ── Descriptor heap methods ────────────────────────────────────
+// Descriptor heap methods
 pub fn descHeapCreate(self: *VkBackend, texture_count: u32, texture_rw_count: u32, sampler_count: u32) !u32 {
     // Pool sizes must be at least as large as the descriptor set layout bindings
     const pool_sizes = [_]vk.DescriptorPoolSize{
@@ -2165,7 +2325,7 @@ pub fn descHeapSetTextures(self: *VkBackend, heap_idx: u32, start_idx: u32, desc
             .sampler = .null_handle,
         };
     }
-    const write = vk.WriteDescriptorSet{
+    const write: vk.WriteDescriptorSet = .{
         .dst_set = dh.sets[0],
         .dst_binding = 0,
         .dst_array_element = start_idx,
@@ -2189,7 +2349,7 @@ pub fn descHeapSetTexturesRw(self: *VkBackend, heap_idx: u32, start_idx: u32, de
             .sampler = .null_handle,
         };
     }
-    const write = vk.WriteDescriptorSet{
+    const write: vk.WriteDescriptorSet = .{
         .dst_set = dh.sets[1],
         .dst_binding = 0,
         .dst_array_element = start_idx,
@@ -2213,7 +2373,7 @@ pub fn descHeapSetSamplers(self: *VkBackend, heap_idx: u32, start_idx: u32, desc
             .image_layout = .undefined,
         };
     }
-    const write = vk.WriteDescriptorSet{
+    const write: vk.WriteDescriptorSet = .{
         .dst_set = dh.sets[2],
         .dst_binding = 0,
         .dst_array_element = start_idx,
@@ -2257,11 +2417,17 @@ fn isBlockCompressed(fmt: vk.Format) bool {
     };
 }
 
-pub fn cmdCopyToTexture(self: *VkBackend, cmd: CommandBufferHandle, tex: TextureHandle, src: BufferHandle, region: TextureRegion) void {
+pub fn cmdCopyToTexture(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    tex: TextureHandle,
+    src: BufferHandle,
+    region: TextureRegion,
+) void {
     const image = self.resolveTextureImage(tex) orelse return;
     const tex_format = self.resolveTextureFormat(tex);
     const compressed = isBlockCompressed(tex_format);
-    const copy = vk.BufferImageCopy{
+    const copy: vk.BufferImageCopy = .{
         .buffer_offset = 0,
         .buffer_row_length = if (compressed) 0 else region.size[0],
         .buffer_image_height = if (compressed) 0 else region.size[1],
@@ -2271,17 +2437,27 @@ pub fn cmdCopyToTexture(self: *VkBackend, cmd: CommandBufferHandle, tex: Texture
             .base_array_layer = region.base_layer,
             .layer_count = region.layer_count,
         },
-        .image_offset = .{ .x = @as(i32, @intCast(region.rect[0])), .y = @as(i32, @intCast(region.rect[1])), .z = @as(i32, @intCast(region.rect[2])) },
+        .image_offset = .{
+            .x = @as(i32, @intCast(region.rect[0])),
+            .y = @as(i32, @intCast(region.rect[1])),
+            .z = @as(i32, @intCast(region.rect[2])),
+        },
         .image_extent = .{ .width = region.size[0], .height = region.size[1], .depth = region.size[2] },
     };
     self.device.cmdCopyBufferToImage(cmd, src, image, .general, &.{copy});
 }
 
-pub fn cmdCopyFromTexture(self: *VkBackend, cmd: CommandBufferHandle, src: TextureHandle, dst: BufferHandle, region: TextureRegion) void {
+pub fn cmdCopyFromTexture(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    src: TextureHandle,
+    dst: BufferHandle,
+    region: TextureRegion,
+) void {
     const image = self.resolveTextureImage(src) orelse return;
     const tex_format = self.resolveTextureFormat(src);
     const compressed = isBlockCompressed(tex_format);
-    const copy = vk.BufferImageCopy{
+    const copy: vk.BufferImageCopy = .{
         .buffer_offset = 0,
         .buffer_row_length = if (compressed) 0 else region.size[0],
         .buffer_image_height = if (compressed) 0 else region.size[1],
@@ -2291,13 +2467,25 @@ pub fn cmdCopyFromTexture(self: *VkBackend, cmd: CommandBufferHandle, src: Textu
             .base_array_layer = region.base_layer,
             .layer_count = region.layer_count,
         },
-        .image_offset = .{ .x = @as(i32, @intCast(region.rect[0])), .y = @as(i32, @intCast(region.rect[1])), .z = @as(i32, @intCast(region.rect[2])) },
+        .image_offset = .{
+            .x = @as(i32, @intCast(region.rect[0])),
+            .y = @as(i32, @intCast(region.rect[1])),
+            .z = @as(i32, @intCast(region.rect[2])),
+        },
         .image_extent = .{ .width = region.size[0], .height = region.size[1], .depth = region.size[2] },
     };
     self.device.cmdCopyImageToBuffer(cmd, image, .general, dst, &.{copy});
 }
 
-pub fn cmdBlitTexture(self: *VkBackend, cmd: CommandBufferHandle, dst: TextureHandle, dst_rect: BlitRect, src: TextureHandle, src_rect: BlitRect, filter: Filter) void {
+pub fn cmdBlitTexture(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    dst: TextureHandle,
+    dst_rect: BlitRect,
+    src: TextureHandle,
+    src_rect: BlitRect,
+    filter: Filter,
+) void {
     const src_img = self.resolveTextureImage(src) orelse return;
     const dst_img = self.resolveTextureImage(dst) orelse return;
     const src_format = self.resolveTextureFormat(src);
@@ -2344,7 +2532,7 @@ pub fn cmdBlitTexture(self: *VkBackend, cmd: CommandBufferHandle, dst: TextureHa
         }
     }
 
-    const blit = vk.ImageBlit{
+    const blit: vk.ImageBlit = .{
         .src_subresource = .{
             .aspect_mask = imageAspect(src_format),
             .mip_level = src_rect.mip_level,
@@ -2364,7 +2552,7 @@ pub fn cmdBlitTexture(self: *VkBackend, cmd: CommandBufferHandle, dst: TextureHa
 }
 
 pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryType) !GpuPtr {
-    if (size == 0) return GpuPtr{};
+    if (size == 0) return .{};
 
     const usage: vk.BufferUsageFlags = .{
         .shader_device_address_bit = true,
@@ -2390,7 +2578,7 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
     };
 
     const mem_type_index = findMemoryType(self, mem_reqs.memory_type_bits, mem_props) orelse return error.OutOfMemory;
-    const flags_info = vk.MemoryAllocateFlagsInfo{
+    const flags_info: vk.MemoryAllocateFlagsInfo = .{
         .flags = .{ .device_address_bit = true },
         .device_mask = 0,
     };
@@ -2411,7 +2599,7 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
         cpu = @ptrCast((try self.device.mapMemory(memory, 0, size, .{})).?);
     }
 
-    const addr_info = vk.BufferDeviceAddressInfo{ .buffer = buf };
+    const addr_info: vk.BufferDeviceAddressInfo = .{ .buffer = buf };
     const gpu_addr = self.device.getBufferDeviceAddress(&addr_info);
 
     try self.allocs.append(self.allocator, .{
@@ -2468,21 +2656,42 @@ pub fn cmdMemCopy(self: *VkBackend, cmd: CommandBufferHandle, src: BufferHandle,
     }});
 }
 
-pub fn cmdSetVertexInput(self: *VkBackend, cmd: CommandBufferHandle, bindings: []const VertexBinding, attributes: []const VertexAttribute) void {
+pub fn cmdSetVertexInput(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    bindings: []const VertexBinding,
+    attributes: []const VertexAttribute,
+) void {
     var vk_bindings: [8]vk.VertexInputBindingDescription2EXT = undefined;
     var vk_attribs: [16]vk.VertexInputAttributeDescription2EXT = undefined;
     const binding_count = @min(bindings.len, 8);
     const attrib_count = @min(attributes.len, 16);
     for (bindings[0..binding_count], 0..) |b, i| {
-        vk_bindings[i] = .{ .binding = b.binding, .stride = b.stride, .input_rate = @enumFromInt(b.input_rate), .divisor = 1 };
+        vk_bindings[i] = .{
+            .binding = b.binding,
+            .stride = b.stride,
+            .input_rate = @enumFromInt(b.input_rate),
+            .divisor = 1,
+        };
     }
     for (attributes[0..attrib_count], 0..) |a, i| {
-        vk_attribs[i] = .{ .location = a.location, .binding = a.binding, .format = @enumFromInt(a.format), .offset = a.offset };
+        vk_attribs[i] = .{
+            .location = a.location,
+            .binding = a.binding,
+            .format = @enumFromInt(a.format),
+            .offset = a.offset,
+        };
     }
     self.device.cmdSetVertexInputEXT(cmd, vk_bindings[0..binding_count], vk_attribs[0..attrib_count]);
 }
 
-pub fn cmdBindVertexBuffer(self: *VkBackend, cmd: CommandBufferHandle, binding: u32, buf: BufferHandle, offset: u64) void {
+pub fn cmdBindVertexBuffer(
+    self: *VkBackend,
+    cmd: CommandBufferHandle,
+    binding: u32,
+    buf: BufferHandle,
+    offset: u64,
+) void {
     self.device.cmdBindVertexBuffers(cmd, binding, &.{buf}, &.{offset});
 }
 

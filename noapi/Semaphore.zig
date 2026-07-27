@@ -6,4 +6,6 @@ const Semaphore = @This();
 gpu: *Gpu,
 handle: Gpu.SemaphoreHandle = .null_handle,
 
-test { std.testing.refAllDecls(@This()); }
+test {
+    std.testing.refAllDecls(@This());
+}

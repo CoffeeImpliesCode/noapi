@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
     exts_copy_global = exts_copy;
 
-    // ── Load shader SPIR-V ────────────────────────────────
+    // ── Load shader SPIR-V
     const grid_vert_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/grid_vert.spv", gpa, .unlimited);
     defer gpa.free(grid_vert_bytes);
     const grid_frag_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/grid_frag.spv", gpa, .unlimited);
@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
     const grid_vert_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, grid_vert_bytes));
     const grid_frag_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, grid_frag_bytes));
 
-    // ── GPU init ───────────────────────────────────────────
+    // ── GPU init
     var gpu = try noapi.Gpu.init(.{
         .frames_in_flight = 2,
         .app_name = "noapi test",
@@ -59,16 +59,16 @@ pub fn main(init: std.process.Init) !void {
     });
     defer gpu.deinit();
 
-    // ── Windows + surfaces ────────────────────────────────
+    // ── Windows + surfaces
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf1 = try noapi.Surface.init(&gpu, surface, .{ .width = 800, .height = 600 });
+    var surf1 = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 800, .height = 600 } });
 
     const sdl_win2 = try sdl3.video.Window.init("noapi-2", 400, 300, .{ .resizable = true });
     try sdl_win2.show();
     const sdl_surface2 = try sdl3.vulkan.Surface.init(sdl_win2, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface2: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface2.surface));
-    var surf2 = try noapi.Surface.init(&gpu, surface2, .{ .width = 400, .height = 300 });
+    var surf2 = try noapi.Surface.init(&gpu, surface2, .{ .extent = .{ .width = 400, .height = 300 } });
 
     const win1_id = try sdl_win.getId();
     const win2_id = try sdl_win2.getId();
@@ -87,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer gpu.textureDestroy(compute_tex);
 
-    // ── Graphics shaders ──────────────────────────────────
+    // ── Graphics shaders
     const grid_vert = try gpu.shaderCreate(grid_vert_spirv, .vertex, "main", "grid_vert");
     defer gpu.shaderDestroy(grid_vert);
     const grid_frag = try gpu.shaderCreate(grid_frag_spirv, .fragment, "main", "grid_frag");
@@ -106,9 +106,9 @@ pub fn main(init: std.process.Init) !void {
     const btri_frag = try gpu.shaderCreate(btri_frag_spirv, .fragment, "main", "btri_frag");
     defer gpu.shaderDestroy(btri_frag);
 
-    // ── Vertex + index buffers ────────────────────────────
-    const VERTEX_SIZE = 20;
-    const vert_buf = try gpu.gpuMalloc(VERTEX_SIZE * 6, 64, .default);
+    // ── Vertex + index buffers
+    const vertex_size = 20;
+    const vert_buf = try gpu.gpuMalloc(vertex_size * 6, 64, .default);
 
     const vert_data: [*]f32 = @ptrCast(@alignCast(vert_buf.cpu));
     vert_data[0] = 0.0;
@@ -173,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
     defer gpu.textureDestroy(rt_tex);
 
     // ── Shared state for window threads ───────────────────
-    var w1 = SharedW1{
+    var w1: SharedW1 = .{
         .sdl = &sdl_win,
         .grid_vert = grid_vert,
         .grid_frag = grid_frag,
@@ -181,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
         .btri_frag = btri_frag,
         .vert_buf = vert_buf,
         .idx_buf = idx_buf,
-        .vertex_size = VERTEX_SIZE,
+        .vertex_size = vertex_size,
         .rt_tex = rt_tex,
         .compute_tex = compute_tex,
         .comp_shader = comp_shader,
@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
         .scratch_buf = scratch_buf,
         .test_sem = test_sem,
     };
-    var w2 = SharedW2{
+    var w2: SharedW2 = .{
         .sdl = &sdl_win2,
         .grid_vert = grid_vert,
         .grid_frag = grid_frag,
@@ -221,7 +221,11 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .window_resized => |we| {
                     const wid = we.id;
-                    if (wid == win1_id) surf1.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) }) else if (wid == win2_id) surf2.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (wid == win1_id) {
+                        surf1.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    } else if (wid == win2_id) {
+                        surf2.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    }
                 },
                 else => {},
             }
@@ -275,7 +279,7 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
         _ = schedule;
 
         const surface_size = win.surfaceSize();
-        const push = noapi.PushData{ .frag_data = time_bits };
+        const push: noapi.PushData = .{ .frag_data = time_bits };
         var cmd = win.commandsBegin();
 
         // ── Pass 1: render grid to offscreen texture ─────────
@@ -307,13 +311,24 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
             const ox = surface_size.width / 4;
             const oy = surface_size.height / 4;
             cmd.beginDebugLabel("tri-RGB", .{ 1, 0, 0, 1 });
-            cmd.setViewport(.{ .x = @floatFromInt(surface_size.width - ox - 10), .y = 10, .width = @floatFromInt(ox), .height = @floatFromInt(oy) });
+            cmd.setViewport(.{
+                .x = @floatFromInt(surface_size.width - ox - 10),
+                .y = 10,
+                .width = @floatFromInt(ox),
+                .height = @floatFromInt(oy),
+            });
             cmd.setScissor(.{ .x = @intCast(surface_size.width - ox - 10), .y = 10, .width = ox, .height = oy });
             cmd.setShaders(s.btri_vert, s.btri_frag);
             cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .none });
-            cmd.setVertexInput(&.{.{ .binding = 0, .stride = s.vertex_size, .input_rate = 0 }}, &.{ .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = 0 }, .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32b32_sfloat), .offset = 8 } });
+            cmd.setVertexInput(
+                &.{.{ .binding = 0, .stride = s.vertex_size, .input_rate = 0 }},
+                &.{
+                    .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = 0 },
+                    .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32b32_sfloat), .offset = 8 },
+                },
+            );
             cmd.bindVertexBuffer(0, s.vert_buf, 0);
-            cmd.drawIndexed(noapi.PushData{}, s.idx_buf, 3, 1, 0, 0);
+            cmd.drawIndexed(.{}, s.idx_buf, 3, 1, 0, 0);
             cmd.endDebugLabel();
         }
 
@@ -322,13 +337,29 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
             const ox = surface_size.width / 4;
             const oy = surface_size.height / 4;
             cmd.beginDebugLabel("tri-CMY", .{ 1, 1, 0, 1 });
-            cmd.setViewport(.{ .x = @floatFromInt(surface_size.width - ox - 10), .y = @floatFromInt(surface_size.height - oy - 10), .width = @floatFromInt(ox), .height = @floatFromInt(oy) });
-            cmd.setScissor(.{ .x = @intCast(surface_size.width - ox - 10), .y = @intCast(surface_size.height - oy - 10), .width = ox, .height = oy });
+            cmd.setViewport(.{
+                .x = @floatFromInt(surface_size.width - ox - 10),
+                .y = @floatFromInt(surface_size.height - oy - 10),
+                .width = @floatFromInt(ox),
+                .height = @floatFromInt(oy),
+            });
+            cmd.setScissor(.{
+                .x = @intCast(surface_size.width - ox - 10),
+                .y = @intCast(surface_size.height - oy - 10),
+                .width = ox,
+                .height = oy,
+            });
             cmd.setShaders(s.btri_vert, s.btri_frag);
             cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .none });
-            cmd.setVertexInput(&.{.{ .binding = 0, .stride = s.vertex_size, .input_rate = 0 }}, &.{ .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = 0 }, .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32b32_sfloat), .offset = 8 } });
+            cmd.setVertexInput(
+                &.{.{ .binding = 0, .stride = s.vertex_size, .input_rate = 0 }},
+                &.{
+                    .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = 0 },
+                    .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32b32_sfloat), .offset = 8 },
+                },
+            );
             cmd.bindVertexBuffer(0, s.vert_buf, 0);
-            cmd.drawIndexed(noapi.PushData{}, s.idx_buf, 3, 1, 3, 0);
+            cmd.drawIndexed(.{}, s.idx_buf, 3, 1, 3, 0);
             cmd.endDebugLabel();
         }
 
@@ -337,7 +368,13 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
         // Blit rt_tex to top-left
         {
             const blit_sz: u32 = @min(256, @min(surface_size.width, surface_size.height));
-            cmd.blitTextureHandle(sc, .{ .offset_a = .{ 0, 0, 0 }, .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 } }, s.rt_tex, .{ .offset_a = .{ 0, 0, 0 }, .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 } }, .linear);
+            cmd.blitTextureHandle(
+                sc,
+                .{ .offset_a = .{ 0, 0, 0 }, .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 } },
+                s.rt_tex,
+                .{ .offset_a = .{ 0, 0, 0 }, .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 } },
+                .linear,
+            );
         }
 
         // Compute: fill compute_tex, then blit to bottom-right
@@ -353,7 +390,13 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
             const blit_sz: u32 = @min(256, @min(surface_size.width, surface_size.height));
             const sx: i32 = @intCast(surface_size.width -| blit_sz);
             const sy: i32 = @intCast(surface_size.height -| blit_sz);
-            cmd.blitTextureHandle(sc, .{ .offset_a = .{ sx, sy, 0 }, .offset_b = .{ sx + @as(i32, @intCast(blit_sz)), sy + @as(i32, @intCast(blit_sz)), 1 } }, s.compute_tex, .{ .offset_a = .{ 0, 0, 0 }, .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 } }, .linear);
+            cmd.blitTextureHandle(
+                sc,
+                .{ .offset_a = .{ sx, sy, 0 }, .offset_b = .{ sx + @as(i32, @intCast(blit_sz)), sy + @as(i32, @intCast(blit_sz)), 1 } },
+                s.compute_tex,
+                .{ .offset_a = .{ 0, 0, 0 }, .offset_b = .{ @as(i32, @intCast(blit_sz)), @as(i32, @intCast(blit_sz)), 1 } },
+                .linear,
+            );
         }
 
         // memCopy + barrier
@@ -405,7 +448,7 @@ fn window2(win: *noapi.Surface, s: *SharedW2) void {
         }, .render_area_size = .{ sz2.width, sz2.height } });
         cmd.setShaders(s.grid_vert, s.grid_frag);
         cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .none });
-        cmd.draw(noapi.PushData{ .frag_data = time_bits }, 384, 1);
+        cmd.draw(.{ .frag_data = time_bits }, 384, 1);
         cmd.endRendering();
 
         // Blit compute texture to bottom-right

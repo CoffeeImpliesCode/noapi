@@ -7,7 +7,8 @@ gpu: u64 = 0,
 vk_buffer: u64 = 0,
 
 pub fn offset(self: GpuPtr, bytes: usize) GpuPtr {
-    return .{ .cpu = self.cpu + bytes, .gpu = self.gpu + @as(u64, @intCast(bytes)) };
+    const b: u64 = @intCast(bytes);
+    return .{ .cpu = self.cpu + bytes, .gpu = self.gpu + b };
 }
 
 pub fn GpuSlice(comptime T: type) type {

@@ -45,14 +45,6 @@ pub fn main(init: std.process.Init) !void {
     const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
     exts_copy_global = exts_copy;
 
-    // ── Load shader SPIR-V ────────────────────────────────
-    const cloud_vert_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/cloud_vert.spv", gpa, .unlimited);
-    defer gpa.free(cloud_vert_bytes);
-    const cloud_frag_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/cloud_frag.spv", gpa, .unlimited);
-    defer gpa.free(cloud_frag_bytes);
-    const cloud_vert_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, cloud_vert_bytes));
-    const cloud_frag_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, cloud_frag_bytes));
-
     // ── GPU init ───────────────────────────────────────────
     var gpu = try noapi.Gpu.init(.{
         .frames_in_flight = 2,
@@ -74,14 +66,14 @@ pub fn main(init: std.process.Init) !void {
     // ── Window surface ────────────────────────────────────
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .width = window_width, .height = window_height });
+    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = window_width, .height = window_height } });
     defer surf.deinit();
 
     // ── Shaders ────────────────────────────────────────────
-    const cloud_vert = try gpu.shaderCreate(cloud_vert_spirv, .vertex, "main", "cloud_vert");
-    defer gpu.shaderDestroy(cloud_vert);
-    const cloud_frag = try gpu.shaderCreate(cloud_frag_spirv, .fragment, "main", "cloud_frag");
-    defer gpu.shaderDestroy(cloud_frag);
+    const cloud_vert = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/cloud_vert.spv", .vertex, "main", "cloud_vert");
+    defer cloud_vert.destroy();
+    const cloud_frag = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/cloud_frag.spv", .fragment, "main", "cloud_frag");
+    defer cloud_frag.destroy();
 
     // ── 3D cloud texture ──────────────────────────────────
     // Generate procedural FBM noise volume on CPU
@@ -190,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
             camera_z: f32,
             _pad: u32,
         };
-        const push_data = CloudPushData{
+        const push_data: CloudPushData = .{
             .cloud_texture = 0,
             .cloud_sampler = 0,
             .camera_x = cam_x,
@@ -229,8 +221,10 @@ pub fn main(init: std.process.Init) !void {
         if (fps_frames == 60) {
             const now = sdl3.timer.getPerformanceCounter();
             const elapsed_ns = now - fps_timer;
-            const fps = @as(f64, @floatFromInt(fps_freq * fps_frames)) / @as(f64, @floatFromInt(elapsed_ns));
-            const ms = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(fps_freq * fps_frames)) * 1000.0;
+            const fps_numer: f64 = @floatFromInt(fps_freq * fps_frames);
+            const fps_denom: f64 = @floatFromInt(elapsed_ns);
+            const fps = fps_numer / fps_denom;
+            const ms = fps_denom / fps_numer * 1000.0;
             std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
             fps_timer = now;
             fps_frames = 0;
@@ -243,14 +237,18 @@ pub fn main(init: std.process.Init) !void {
 /// Generate a 128×128×128 cloud volume using FBM value noise.
 fn generateCloudVolume(data: []u8) void {
     const size: usize = @intCast(volume_res);
-    const inv: f32 = 1.0 / @as(f32, @floatFromInt(size - 1));
+    const size_f: f32 = @floatFromInt(size - 1);
+    const inv: f32 = 1.0 / size_f;
 
     for (0..size) |z| {
         for (0..size) |y| {
             for (0..size) |x| {
-                const nx = @as(f32, @floatFromInt(x)) * inv;
-                const ny = @as(f32, @floatFromInt(y)) * inv;
-                const nz = @as(f32, @floatFromInt(z)) * inv;
+                const x_f: f32 = @floatFromInt(x);
+                const y_f: f32 = @floatFromInt(y);
+                const z_f: f32 = @floatFromInt(z);
+                const nx = x_f * inv;
+                const ny = y_f * inv;
+                const nz = z_f * inv;
 
                 // FBM noise shaped into cloud density
                 const n = fbm(nx * 3.0, ny * 3.0, nz * 3.0);
@@ -268,23 +266,29 @@ fn smooth(t: f32) f32 {
 }
 
 fn hash3(x: i32, y: i32, z: i32) f32 {
-    var h: u32 = @as(u32, @intCast(x)) *% 73856093 ^
-        @as(u32, @intCast(y)) *% 19349663 ^
-        @as(u32, @intCast(z)) *% 83492791;
+    const x_u32: u32 = @intCast(x);
+    const y_u32: u32 = @intCast(y);
+    const z_u32: u32 = @intCast(z);
+    var h: u32 = x_u32 *% 73856093 ^ y_u32 *% 19349663 ^ z_u32 *% 83492791;
     h ^= h >> 13;
     h *%= 0x85ebca6b;
     h ^= h >> 16;
-    return @as(f32, @floatFromInt(h)) / @as(f32, @floatFromInt(std.math.maxInt(u32)));
+    const h_f: f32 = @floatFromInt(h);
+    const max_f: f32 = @floatFromInt(std.math.maxInt(u32));
+    return h_f / max_f;
 }
 
 fn valueNoise(x: f32, y: f32, z: f32) f32 {
-    const xi = @as(i32, @intFromFloat(@floor(x)));
-    const yi = @as(i32, @intFromFloat(@floor(y)));
-    const zi = @as(i32, @intFromFloat(@floor(z)));
+    const xi: i32 = @intFromFloat(@floor(x));
+    const yi: i32 = @intFromFloat(@floor(y));
+    const zi: i32 = @intFromFloat(@floor(z));
 
-    const xf = smooth(x - @as(f32, @floatFromInt(xi)));
-    const yf = smooth(y - @as(f32, @floatFromInt(yi)));
-    const zf = smooth(z - @as(f32, @floatFromInt(zi)));
+    const xi_f: f32 = @floatFromInt(xi);
+    const yi_f: f32 = @floatFromInt(yi);
+    const zi_f: f32 = @floatFromInt(zi);
+    const xf = smooth(x - xi_f);
+    const yf = smooth(y - yi_f);
+    const zf = smooth(z - zi_f);
 
     const c000 = hash3(xi + 0, yi + 0, zi + 0);
     const c100 = hash3(xi + 1, yi + 0, zi + 0);

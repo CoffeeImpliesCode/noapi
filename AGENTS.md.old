@@ -1,0 +1,26 @@
+# NoAPI Graphics API
+Zig project that presents a simplified graphics API around Vulkan
+ - see notes/API_DESIGN_PLAN.md, notes/api-comparison.md, notes/implementation-plan.md
+ - see transcripts/README.md, transcripts/howtovulkan-2026.md, transcripts/vk_minimal_latest.md, transcripts/its-not-about-the-api.md for info about modern vulkan
+ - synthesis of `mr_gpu` (~/projects/codeberg-Games-by-Mason-mr_gpu), `sokol`, `gpui` (~/projects/github-zed-industries-zed/crates/gpui), `no_gfx_api` (~/Projects/github-leotmp-no_gfx_api) as basis
+
+# Technologies
+ - Zig 0.16
+ - source philosophy: tiger-style, nasa coding guidelines, simple code
+ - jj version control - DO NOT USE GIT COMMANDS
+ - API/Backend separation
+
+# Development
+ - use tools, always use `edit` instead of rewriting the file
+ - using shell for large edits is unadvised
+ - do tasks in parallel, always prefer spawning multiple subagents
+ - break tasks down, assume subagents are dumb, give full instruction, use many subagents with small tasks each
+ - Delegate, Delegate, Delegate.
+ - Be as parallel as possible. 8 files touched? 8 workers. 3 research topics? 3 librarians. 5 hard problems? 5 oracles.
+
+# Validation
+ - `zig build check` for quick errors
+ - `zig build` for full validation
+ - `look_at` tool when capturing frames to check for expected visual output
+ - `ziglint` compliance (except unsafe undefined) after every implementation change 
+ - run examples like `zig build 1_triangle` with timeout and collect stdout&stderr to check for vulkan validation errors 

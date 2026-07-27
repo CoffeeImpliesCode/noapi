@@ -17,26 +17,26 @@ pub const tracy_options: tracy.Options = .{
     .manual_lifetime = false,
 };
 
-const WIDTH: u32 = 1000;
-const HEIGHT: u32 = 1000;
-const FRAMES_IN_FLIGHT: u5 = 3;
+const win_width: u32 = 1000;
+const win_height: u32 = 1000;
+const frames_in_flight: u5 = 3;
 
 // Cube geometry: 6 faces × 4 verts = 24 verts, 6 faces × 6 indices = 36 indices.
-const CUBE_VERTS: u32 = 24;
-const CUBE_INDICES: u32 = 36;
+const cube_verts: u32 = 24;
+const cube_indices: u32 = 36;
 
 // Per-frame data buffer layout (matches shader struct).
 // std430 alignment: vec4 = 16, mat4 = 16 (column-major).
 const PerFrameData = extern struct {
-    positions: [CUBE_VERTS][4]f32 align(16),
-    colors: [CUBE_VERTS][4]f32 align(16),
+    positions: [cube_verts][4]f32 align(16),
+    colors: [cube_verts][4]f32 align(16),
     model_to_world: [16]f32 align(16),
     world_to_view: [16]f32 align(16),
     view_to_proj: [16]f32 align(16),
 };
 
 // Cube vertex positions (centered at origin, side length 1).
-const CUBE_POSITIONS: [CUBE_VERTS][4]f32 = .{
+const cube_positions: [cube_verts][4]f32 = .{
     // Front (z = +0.5)
     .{ -0.5, -0.5, 0.5, 1.0 },
     .{ 0.5, -0.5, 0.5, 1.0 },
@@ -70,7 +70,7 @@ const CUBE_POSITIONS: [CUBE_VERTS][4]f32 = .{
 };
 
 // Cube vertex colors (one per face, repeated 4×).
-const CUBE_COLORS: [CUBE_VERTS][4]f32 = .{
+const cube_colors: [cube_verts][4]f32 = .{
     // Front: red
     .{ 1.0, 0.0, 0.0, 1.0 }, .{ 1.0, 0.0, 0.0, 1.0 }, .{ 1.0, 0.0, 0.0, 1.0 }, .{ 1.0, 0.0, 0.0, 1.0 },
     // Back: green
@@ -86,7 +86,7 @@ const CUBE_COLORS: [CUBE_VERTS][4]f32 = .{
 };
 
 // Cube index buffer (2 triangles per face, 6 faces).
-const CUBE_INDEX_DATA: [CUBE_INDICES]u32 = .{
+const cube_index_data: [cube_indices]u32 = .{
     0, 1, 2, 0, 2, 3, // front
     4, 5, 6, 4, 6, 7, // back
     8, 9, 10, 8, 10, 11, // top
@@ -104,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
     try sdl3.init(.{ .video = true, .events = true });
     defer sdl3.quit(.{ .video = true, .events = true });
 
-    const sdl_win = try sdl3.video.Window.init("3D Cube", @intCast(WIDTH), @intCast(HEIGHT), .{ .resizable = true });
+    const sdl_win = try sdl3.video.Window.init("3D Cube", @intCast(win_width), @intCast(win_height), .{ .resizable = true });
     try sdl_win.show();
     defer sdl_win.deinit();
 
@@ -116,17 +116,9 @@ pub fn main(init: std.process.Init) !void {
     const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
     exts_copy_global = exts_copy;
 
-    // ── Load shader SPIR-V ────────────────────────────────
-    const vert_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/cube_vert.spv", gpa, .unlimited);
-    defer gpa.free(vert_bytes);
-    const frag_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/cube_frag.spv", gpa, .unlimited);
-    defer gpa.free(frag_bytes);
-    const vert_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, vert_bytes));
-    const frag_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, frag_bytes));
-
     // ── GPU init ───────────────────────────────────────────
     var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = FRAMES_IN_FLIGHT,
+        .frames_in_flight = frames_in_flight,
         .app_name = "3D Cube",
         .validation = true,
         .loader = .{
@@ -141,25 +133,25 @@ pub fn main(init: std.process.Init) !void {
     // ── Surface ────────────────────────────────────────────
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .width = WIDTH, .height = HEIGHT });
+    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = win_width, .height = win_height }, .present_mode = .fifo });
     defer surf.deinit();
 
     const win_id = try sdl_win.getId();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try gpu.shaderCreate(vert_spirv, .vertex, "main", "cube_vert");
-    defer gpu.shaderDestroy(vert_shader);
-    const frag_shader = try gpu.shaderCreate(frag_spirv, .fragment, "main", "cube_frag");
-    defer gpu.shaderDestroy(frag_shader);
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/cube_vert.spv", .vertex, "main", "cube_vert");
+    defer vert_shader.destroy();
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/cube_frag.spv", .fragment, "main", "cube_frag");
+    defer frag_shader.destroy();
 
     // ── Depth texture ──────────────────────────────────────
     var depth_handle = try gpu.textureCreate(.{
-        .dimensions = .{ WIDTH, HEIGHT, 1 },
+        .dimensions = .{ win_width, win_height, 1 },
         .format = .d32_float,
         .usage = .{ .sampled = false, .depth_stencil_attachment = true },
     });
     defer gpu.textureDestroy(depth_handle);
-    var depth_size = [2]u32{ WIDTH, HEIGHT };
+    var depth_size = [2]u32{ win_width, win_height };
 
     // ── GPU buffers ────────────────────────────────────────
     // Per-frame data buffer (positions + colors + matrices).
@@ -168,12 +160,12 @@ pub fn main(init: std.process.Init) !void {
     defer gpu.gpuFree(frame_data_buf);
 
     // Index buffer.
-    const idx_buf_size = @sizeOf(u32) * CUBE_INDICES;
+    const idx_buf_size = @sizeOf(u32) * cube_indices;
     const idx_buf = try gpu.gpuMalloc(idx_buf_size, 64, .default);
     defer gpu.gpuFree(idx_buf);
 
     // Fill index buffer.
-    @memcpy(idx_buf.cpu[0..idx_buf_size], std.mem.sliceAsBytes(&CUBE_INDEX_DATA));
+    @memcpy(idx_buf.cpu[0..idx_buf_size], std.mem.sliceAsBytes(&cube_index_data));
 
     // ── Semaphore for frame pacing ─────────────────────────
     const frame_sem = try gpu.semaphoreCreate(0);
@@ -244,13 +236,13 @@ pub fn main(init: std.process.Init) !void {
             @panic("beginFrame");
         };
 
-        const size = try sdl_win.getSizeInPixels();
-        if (size.@"0" == 0 or size.@"1" == 0) {
+        const sz = surf.surfaceSize();
+        if (sz.width == 0 or sz.height == 0) {
             _ = surf.endFrame(.{ .blit_to_swapchain = true });
             continue;
         }
-        const surf_w: u32 = @intCast(size.@"0");
-        const surf_h: u32 = @intCast(size.@"1");
+        const surf_w = sz.width;
+        const surf_h = sz.height;
 
         // ── Resize depth texture if needed ─────────────────
         if (depth_size[0] != surf_w or depth_size[1] != surf_h) {
@@ -266,7 +258,9 @@ pub fn main(init: std.process.Init) !void {
 
         // ── Delta time ─────────────────────────────────────
         const now_ts = sdl3.timer.getPerformanceCounter();
-        const dt = @min(max_dt, @as(f32, @floatFromInt(now_ts -| prev_ts)) / @as(f32, @floatFromInt(ts_freq)));
+        const dt_numer: f32 = @floatFromInt(now_ts -| prev_ts);
+        const dt_denom: f32 = @floatFromInt(ts_freq);
+        const dt = @min(max_dt, dt_numer / dt_denom);
 
         prev_ts = now_ts;
 
@@ -336,7 +330,9 @@ pub fn main(init: std.process.Init) !void {
         };
 
         // ── Build projection matrix ────────────────────────
-        const aspect = @as(f32, @floatFromInt(surf_w)) / @as(f32, @floatFromInt(surf_h));
+        const w_f: f32 = @floatFromInt(surf_w);
+        const h_f: f32 = @floatFromInt(surf_h);
+        const aspect = w_f / h_f;
         const fov_y: f32 = std.math.pi / 3.0; // 60°
         const near_z: f32 = 0.1;
         const far_z: f32 = 100.0;
@@ -359,8 +355,8 @@ pub fn main(init: std.process.Init) !void {
 
         // ── Fill per-frame data buffer ─────────────────────
         const pfd: *PerFrameData = @ptrCast(@alignCast(frame_data_buf.cpu));
-        @memcpy(&pfd.positions, &CUBE_POSITIONS);
-        @memcpy(&pfd.colors, &CUBE_COLORS);
+        @memcpy(&pfd.positions, &cube_positions);
+        @memcpy(&pfd.colors, &cube_colors);
         @memcpy(&pfd.model_to_world, &model);
         @memcpy(&pfd.world_to_view, &view);
         @memcpy(&pfd.view_to_proj, &proj);
@@ -394,7 +390,7 @@ pub fn main(init: std.process.Init) !void {
         cmd.setDepthState(.{ .mode = .{ .read = true, .write = true }, .compare = .less_equal });
 
         // Draw indexed cube: pass buffer device address via vert_data push constant.
-        cmd.drawIndexed(.{ .vert_data = frame_data_buf.gpu }, idx_buf, CUBE_INDICES, 1, 0, 0);
+        cmd.drawIndexed(.{ .vert_data = frame_data_buf.gpu }, idx_buf, cube_indices, 1, 0, 0);
 
         cmd.endRendering();
 
@@ -404,8 +400,8 @@ pub fn main(init: std.process.Init) !void {
         _ = surf.endFrame(.{ .blit_to_swapchain = true });
 
         // Frame pacing: wait if GPU is N frames ahead.
-        if (frame_counter >= FRAMES_IN_FLIGHT) {
-            gpu.semaphoreWait(frame_sem, frame_counter - FRAMES_IN_FLIGHT + 1);
+        if (frame_counter >= frames_in_flight) {
+            gpu.semaphoreWait(frame_sem, frame_counter - frames_in_flight + 1);
         }
 
         // ── FPS output ──────────────────────────────────────
@@ -413,8 +409,10 @@ pub fn main(init: std.process.Init) !void {
         if (fps_frames == 60) {
             const now = sdl3.timer.getPerformanceCounter();
             const elapsed_ns = now - fps_timer;
-            const fps = @as(f64, @floatFromInt(fps_freq * fps_frames)) / @as(f64, @floatFromInt(elapsed_ns));
-            const ms = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(fps_freq * fps_frames)) * 1000.0;
+            const fps_numer: f64 = @floatFromInt(fps_freq * fps_frames);
+            const fps_denom: f64 = @floatFromInt(elapsed_ns);
+            const fps = fps_numer / fps_denom;
+            const ms = fps_denom / fps_numer * 1000.0;
             std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
             fps_timer = now;
             fps_frames = 0;

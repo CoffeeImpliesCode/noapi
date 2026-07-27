@@ -1,63 +1,98 @@
-# API Issue Fix Plan
+# noapi — Current State & Analysis
 
-Build status: `zig build` exits 0.
+**Build**: `zig build` ✓ | `zig build -Denable-tracy=true` ✓  
+**Validation**: 0 errors across examples 1-6  
+**Tracy**: 42 CPU zones (API) + 15 blocking backend zones (tomato), `-Denable-tracy=true` build option  
+**Zig**: 0.16.0, LLVM backend forced on all exes  
 
-## Issues
+## Completed Work
 
-### 1. GpuArena.create — unusable (P0)
+### API Layer
+- `SurfaceOptions` struct with `present_mode` (fifo/mailbox/immediate/fifo_relaxed)
+- `Surface.init` takes `SurfaceOptions` instead of raw parameters
+- Gpu `Options` struct already existed with `frames_in_flight`
+- `frames_in_flight` properly propagated from init → backend → window
+- `CommandBuffer.zig`: 24 Tracy CPU zones on all recording methods
+- `Gpu.zig`: 13 Tracy CPU zones on lifecycle ops
+- `Surface.zig`: 3 Tracy CPU zones on frame boundary ops
+- `VkBackend.zig`: 15 tomato Tracy zones on blocking calls (waitForFences, acquire, submit, present)
 
-`GpuArena.gpuMalloc` (no-arg, standalone) calls `gpuMalloc(size, @alignOf(u64), .default)` which hits the stub that returns `BackendError`.
+### Backend
+- `addWindow` takes `SurfaceOptions` instead of raw extent
+- Present mode flows through to swapchain creation (no hardcoded MAILBOX override)
+- Swapchain barrier: `old_layout = .undefined` (not `.present_src_khr`)
+- `draw_indirect_count = .true` in vk12 features
+- Surface formats: picks `b8g8r8a8_srgb + srgb_nonlinear_khr`
 
-**Fix**: `GpuArena` needs a `*Gpu` reference to delegate allocation. Change `create(size)` to `create(gpu: *Gpu, size: usize)`, call `gpu.gpuMalloc`.
+### Enums (fixed to match Vulkan values)
+- `Rendering.LoadOp`: loads=0, clear=1, dont_care=2
+- `Rendering.StoreOp`: store=0, dont_care=1
+- `RasterState.Topology`: full Vulkan set with explicit values
+- `RasterState.CullMode`: none=0, front=1, back=2, all=3
+- `RasterState.FrontFace`: explicit values
+- `RasterState.BlendOp`: matches Vulkan by coincidence
+- `DepthState.CompareOp`: explicit values
+- `BlendState.BlendFactor`: corrected to Vulkan interleaved ordering
+- `CommandBuffer.IndexFormat`: u16=0, u32=1, u8, none
 
+### Tracy Setup
+- `-Denable-tracy` build option (disabled by default, zero-cost)
+- `tracy_impl` module on all 8 executables (enabled/disabled toggle)
+- `pub const tracy` + `tracy_impl` + `tracy_options` in all examples (must be `pub` for `@hasDecl(root, ...)`)
+- tracy_zig updated to latest commit `39cf5b55`
+
+### Examples
+- Uniform FPS output: `"FPS: {d:.1}  frame: {d:.2}ms\n"` every 60 frames
+- `Surface.init` uses `SurfaceOptions` with `.extent`
+- Render area uses `surf.surfaceSize()` (not SDL `getSizeInPixels`) to prevent resize crash
+- `use_llvm = true` on all executables
+- 3_3D: default present_mode = .fifo
+- Present mode chain: SurfaceOptions → addWindow → swapchain (fully wired)
+
+## Remaining Issues
+
+### 1. GpuArena — needs Gpu reference (P0)
+`GpuArena.create()` takes no `*Gpu`, so `gpuMalloc` can't be called → returns `BackendError`.  
+**Fix**: `create(gpu: *Gpu, size: usize)` delegate to `gpu.gpuMalloc`.  
 **File**: `noapi/GpuArena.zig`
 
-### 2. Gpu.bufferCreate/bufferDestroy — broken lifecycle (P0)
-
-`bufferCreate` calls `gpuMalloc` but sets `.handle = .null_handle` (never stores the actual vk.Buffer handle). `bufferDestroy` is a total no-op — leaks the allocation. The test avoids this by using raw `gpuMalloc`/`gpuFree` directly.
-
-**Fix**: Wire `bufferCreate` through `VkBackend.bufferCreate` (which doesn't exist yet). OR remove `Buffer` struct + methods since the codebase uses `GpuPtr`+`gpuMalloc` instead (the no_gfx_api pattern). The latter is cleaner: `Buffer` is dead code.
-
-**File**: `noapi/Gpu.zig` lines 107-114
-
-### 3. Gpu.gpuHostToDevicePointer — wrong behavior (P1)
-
-Returns `GpuPtr{}` with all zeros, ignoring args. Should translate a CPU pointer to a GPU address. The `GpuPtr` already caches this in its `.gpu` field from `gpuMalloc`, but for arbitrary CPU pointers this needs the BDA extension.
-
-**Fix**: Since noapi uses BDA, `gpuHostToDevicePointer` can return the cpu address as the gpu address (identity mapping on UMA) or just return the pointer cast to u64. Currently unused in test. Simplest: implement as `return GpuPtr{ .cpu = cpu_ptr, .gpu = @intFromPtr(cpu_ptr) }`.
-
-**File**: `noapi/Gpu.zig` lines 166-170
-
-### 4. Gpu.drawTriangles — no-op (P1)
-
-All args ignored, does nothing. This is a vestige of the dvui single-draw-call pattern, not the no_gfx_api push-constant design that the rest of the API follows. The test uses `CommandBuffer.draw()` instead.
-
-**Fix**: Wire to a proper indexed-triangle draw via the backend. Uses `cmdSetShaders`, push constants, index buffer, draw. OR delete it as dead code. Keeping it but making it work is better API hygiene.
-
-**File**: `noapi/Gpu.zig` lines 151-158
-
-### 5. DescriptorPool alloc* — return 0 (P1)
-
-`allocTexture`/`allocTextureRw`/`allocSampler` all `_ = self; return 0;`. Won't produce valid descriptors at runtime.
-
-**Fix**: Implement freelist tracking. Use `next_texture`/`next_texture_rw`/`next_sampler` counters and return the current index, incrementing after. Since descriptor heap uses descriptor_buffer-style opaque u64, the index IS the descriptor for a linear heap. This is correct if the heap is a flat array and slots are allocated sequentially.
-
-**File**: `noapi/DescriptorPool.zig`
-
-### 6. Gpu.zig duplicate type re-exports (P2)
-
-Bottom of `Gpu.zig` has ~40 `pub const TextureHandle = @import(...)` etc. These duplicate what `root.zig` already exports. Harmless but noisy.
-
-**Fix**: Remove the duplicate `pub const` block from `Gpu.zig` (lines 203-246). All types are available from `root.zig`.
-
+### 2. Gpu.bufferCreate / bufferDestroy — dead code (P0)
+Both are no-ops. The codebase uses `GpuPtr` + `gpuMalloc`/`gpuFree` instead (no_gfx_api pattern).  
+**Fix**: Wire through backend OR delete `Buffer` struct + methods.  
 **File**: `noapi/Gpu.zig`
 
-## Execution Order
+### 3. Gpu.drawTriangles — dead code (P1)
+All args ignored, does nothing. Vestige of dvui pattern. API uses `CommandBuffer.draw[Indexed]` instead.  
+**Fix**: Wire to indexed draw OR delete.  
+**File**: `noapi/Gpu.zig`
 
-1. `Gpu.zig`: remove duplicate re-exports (trivial, no risk)
-2. `DescriptorPool.zig`: fix alloc* stubs (trivial)
-3. `Gpu.zig`: fix `gpuHostToDevicePointer` (trivial)
-4. `GpuArena.zig`: fix `create` to take `*Gpu` (moderate)
-5. `Gpu.zig`: fix `bufferCreate`/`bufferDestroy` (moderate)
-6. `Gpu.zig`: fix `drawTriangles` (moderate)
-7. `zig build` after each to verify
+### 4. DescriptorPool alloc* — return 0 (P1)
+`allocTexture`/`allocSampler` all return 0 without proper freelist tracking. Works for single allocations but breaks on multiple.  
+**Fix**: Implement sequential slot tracking with counters.  
+**File**: `noapi/DescriptorPool.zig`
+
+### 5. Gpu.gpuHostToDevicePointer — stub (P1)
+Ignores args, returns zeroed GpuPtr. Needs BDA-based implementation or identity mapping.  
+**Fix**: `return GpuPtr{ .cpu = cpu_ptr, .gpu = @intFromPtr(cpu_ptr) };`  
+**File**: `noapi/Gpu.zig`
+
+### 6. Gpu.zig duplicate type re-exports (P2)
+~40 `pub const TextureHandle = @import(...)` at bottom of Gpu.zig duplicates root.zig exports.  
+**Fix**: Remove block.  
+**File**: `noapi/Gpu.zig`
+
+### 7. Swapchain format selection always picks first (P2)
+Line 1531: `var chosen_format: vk.SurfaceFormatKHR = formats[0];` — if b8g8r8a8_srgb isn't first, falls back to first entry.  
+**Fix**: More robust format preference loop.  
+**File**: `noapi/VkBackend.zig:1531`
+
+### 8. Example frame pacing — no sleep (P2)
+All examples busy-loop at CPU speed. With FIFO vsync, Wayland/niri may not block acquire properly → 100% CPU.  
+**Fix**: Use `FrameSchedule.next_vblank_us` or `std.time.sleep` for frame pacing.  
+**Files**: All examples
+
+## Build Config
+- `use_llvm = true` on all 8 executables
+- `tracy_impl` module conditional on `-Denable-tracy`
+- SDL3, noapi, tracy modules on all exes
+- Tracy C++ client force-built at ReleaseFast (Debug → ReleaseFast workaround)

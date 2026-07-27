@@ -45,14 +45,6 @@ pub fn main(init: std.process.Init) !void {
     const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
     exts_copy_global = exts_copy;
 
-    // ── Load shader SPIR-V ────────────────────────────────
-    const vert_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/triangle_vert.spv", gpa, .unlimited);
-    defer gpa.free(vert_bytes);
-    const frag_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/triangle_frag.spv", gpa, .unlimited);
-    defer gpa.free(frag_bytes);
-    const vert_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, vert_bytes));
-    const frag_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, frag_bytes));
-
     // ── GPU init ───────────────────────────────────────────
     var gpu = try noapi.Gpu.init(.{
         .frames_in_flight = frames_in_flight,
@@ -70,14 +62,14 @@ pub fn main(init: std.process.Init) !void {
     // ── Surface ────────────────────────────────────────────
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .width = start_width, .height = start_height });
+    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = start_width, .height = start_height } });
     defer surf.deinit();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try gpu.shaderCreate(vert_spirv, .vertex, "main", "triangle_vert");
-    defer gpu.shaderDestroy(vert_shader);
-    const frag_shader = try gpu.shaderCreate(frag_spirv, .fragment, "main", "triangle_frag");
-    defer gpu.shaderDestroy(frag_shader);
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/triangle_vert.spv", .vertex, "main", "triangle_vert");
+    defer vert_shader.destroy();
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/triangle_frag.spv", .fragment, "main", "triangle_frag");
+    defer frag_shader.destroy();
 
     // ── Timing ─────────────────────────────────────────────
     const ts_freq = sdl3.timer.getPerformanceFrequency();
@@ -120,7 +112,9 @@ pub fn main(init: std.process.Init) !void {
         // ── Delta time ─────────────────────────────────────
         const last_ts = now_ts;
         now_ts = sdl3.timer.getPerformanceCounter();
-        const delta = @as(f32, @floatCast(@as(f64, @floatFromInt(now_ts - last_ts)) / @as(f64, @floatFromInt(ts_freq))));
+        const dt_numer: f64 = @floatFromInt(now_ts - last_ts);
+        const dt_denom: f64 = @floatFromInt(ts_freq);
+        const delta: f32 = @floatCast(dt_numer / dt_denom);
         const max_dt: f32 = 1.0 / 10.0;
         const dt = @min(max_dt, delta);
 
@@ -150,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
 
         cmd.setShaders(vert_shader, frag_shader);
         cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .none });
-        cmd.draw(noapi.PushData{}, 3, 1);
+        cmd.draw(.{}, 3, 1);
 
         cmd.endRendering();
 
@@ -161,8 +155,10 @@ pub fn main(init: std.process.Init) !void {
         if (fps_frames == 60) {
             const now = sdl3.timer.getPerformanceCounter();
             const elapsed_ns = now - fps_timer;
-            const fps = @as(f64, @floatFromInt(fps_freq * fps_frames)) / @as(f64, @floatFromInt(elapsed_ns));
-            const ms = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(fps_freq * fps_frames)) * 1000.0;
+            const fps_numer: f64 = @floatFromInt(fps_freq * fps_frames);
+            const fps_denom: f64 = @floatFromInt(elapsed_ns);
+            const fps = fps_numer / fps_denom;
+            const ms = fps_denom / fps_numer * 1000.0;
             std.debug.print("FPS: {d:.1}  frame: {d:.2}ms\n", .{ fps, ms });
             fps_timer = now;
             fps_frames = 0;

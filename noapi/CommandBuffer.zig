@@ -1,6 +1,5 @@
 //! Command buffer — GPU command recording.
 const std = @import("std");
-const vk = @import("vk.zig");
 const Gpu = @import("Gpu.zig");
 const SamplerDesc = @import("Texture.zig").SamplerDesc;
 const tracy = @import("tracy");
@@ -49,23 +48,63 @@ pub fn draw(self: *CommandBuffer, data: PushData, vertex_count: u32, instance_co
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
     self.gpu.backend.cmdDraw(self.handle, vertex_count, instance_count);
 }
-pub fn drawIndexed(self: *CommandBuffer, data: PushData, indices: GpuPtr, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32) void {
+
+pub fn drawIndexed(
+    self: *CommandBuffer,
+    data: PushData,
+    indices: GpuPtr,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+) void {
     const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
     self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
     self.gpu.backend.cmdDrawIndexed(self.handle, index_count, instance_count, first_index, vertex_offset);
 }
-pub fn drawIndexedIndirect(self: *CommandBuffer, data: PushData, indices: GpuPtr, arguments: GpuPtr, max_draws: u32) void {
+
+pub fn drawIndexedIndirect(
+    self: *CommandBuffer,
+    data: PushData,
+    indices: GpuPtr,
+    arguments: GpuPtr,
+    max_draws: u32,
+) void {
     const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
     self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
-    self.gpu.backend.cmdDrawIndexedIndirect(self.handle, @enumFromInt(arguments.vk_buffer), 0, max_draws, @sizeOf(DrawIndexedIndirectCommand));
+    self.gpu.backend.cmdDrawIndexedIndirect(
+        self.handle,
+        @enumFromInt(arguments.vk_buffer),
+        0,
+        max_draws,
+        @sizeOf(DrawIndexedIndirectCommand),
+    );
 }
-pub fn drawIndexedIndirectMulti(self: *CommandBuffer, data: PushData, indices: GpuPtr, arguments: GpuPtr, stride: u32, count_buffer: GpuPtr, count_offset: u64, max_draws: u32) void {
+
+pub fn drawIndexedIndirectMulti(
+    self: *CommandBuffer,
+    data: PushData,
+    indices: GpuPtr,
+    arguments: GpuPtr,
+    stride: u32,
+    count_buffer: GpuPtr,
+    count_offset: u64,
+    max_draws: u32,
+) void {
     const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
     self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, .u32);
-    self.gpu.backend.cmdDrawIndexedIndirectMulti(self.handle, @enumFromInt(arguments.vk_buffer), 0, stride, @enumFromInt(count_buffer.vk_buffer), count_offset, max_draws);
+    self.gpu.backend.cmdDrawIndexedIndirectMulti(
+        self.handle,
+        @enumFromInt(arguments.vk_buffer),
+        0,
+        stride,
+        @enumFromInt(count_buffer.vk_buffer),
+        count_offset,
+        max_draws,
+    );
 }
 pub fn dispatch(self: *CommandBuffer, data: u64, group_x: u32, group_y: u32, group_z: u32) void {
     const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
@@ -175,7 +214,15 @@ pub fn copyToTexture(self: *CommandBuffer, tex: Texture, src: GpuPtr, region: Te
 pub fn copyFromTexture(self: *CommandBuffer, tex: Texture, dst: GpuPtr, region: TextureRegion) void {
     self.gpu.backend.cmdCopyFromTexture(self.handle, tex.handle, @enumFromInt(dst.vk_buffer), region);
 }
-pub fn blitTextureHandle(self: *CommandBuffer, dst: TextureHandle, dst_rect: BlitRect, src: TextureHandle, src_rect: BlitRect, filter: Filter) void {
+
+pub fn blitTextureHandle(
+    self: *CommandBuffer,
+    dst: TextureHandle,
+    dst_rect: BlitRect,
+    src: TextureHandle,
+    src_rect: BlitRect,
+    filter: Filter,
+) void {
     const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
     self.gpu.backend.cmdBlitTexture(self.handle, dst, dst_rect, src, src_rect, filter);
 }

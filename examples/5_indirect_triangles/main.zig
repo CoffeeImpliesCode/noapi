@@ -18,10 +18,10 @@ pub const tracy_options: tracy.Options = .{
     .manual_lifetime = false,
 };
 
-const NUM_TRIANGLES: u32 = 32;
-const WINDOW_WIDTH: u32 = 1000;
-const WINDOW_HEIGHT: u32 = 1000;
-const FRAMES_IN_FLIGHT: u5 = 3;
+const num_triangles: u32 = 32;
+const window_width: u32 = 1000;
+const window_height: u32 = 1000;
+const frames_in_flight: u5 = 3;
 
 // Per-draw data that follows DrawIndexedIndirectCommand in the indirect buffer.
 const PerDrawData = extern struct {
@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     try sdl3.init(.{ .video = true, .events = true });
     defer sdl3.quit(.{ .video = true, .events = true });
 
-    const sdl_win = try sdl3.video.Window.init("Indirect Triangles", WINDOW_WIDTH, WINDOW_HEIGHT, .{ .resizable = true });
+    const sdl_win = try sdl3.video.Window.init("Indirect Triangles", window_width, window_height, .{ .resizable = true });
     try sdl_win.show();
 
     // ── Vulkan loader via SDL3 ───────────────────────────
@@ -62,17 +62,9 @@ pub fn main(init: std.process.Init) !void {
     const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
     exts_copy_global = exts_copy;
 
-    // ── Load shader SPIR-V ────────────────────────────────
-    const vert_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/indirect_tri_vert.spv", gpa, .unlimited);
-    defer gpa.free(vert_bytes);
-    const frag_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/indirect_tri_frag.spv", gpa, .unlimited);
-    defer gpa.free(frag_bytes);
-    const vert_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, vert_bytes));
-    const frag_spirv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, frag_bytes));
-
     // ── GPU init ───────────────────────────────────────────
     var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = FRAMES_IN_FLIGHT,
+        .frames_in_flight = frames_in_flight,
         .app_name = "Indirect Triangles",
         .validation = true,
         .loader = .{
@@ -87,14 +79,14 @@ pub fn main(init: std.process.Init) !void {
     // ── Surface ────────────────────────────────────────────
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .width = WINDOW_WIDTH, .height = WINDOW_HEIGHT });
+    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = window_width, .height = window_height } });
     defer surf.deinit();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_shader = try gpu.shaderCreate(vert_spirv, .vertex, "main", "indirect_tri_vert");
-    defer gpu.shaderDestroy(vert_shader);
-    const frag_shader = try gpu.shaderCreate(frag_spirv, .fragment, "main", "indirect_tri_frag");
-    defer gpu.shaderDestroy(frag_shader);
+    const vert_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/indirect_tri_vert.spv", .vertex, "main", "indirect_tri_vert");
+    defer vert_shader.destroy();
+    const frag_shader = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/indirect_tri_frag.spv", .fragment, "main", "indirect_tri_frag");
+    defer frag_shader.destroy();
 
     // ── Vertex buffer (single triangle shared by all draws) ─
     const vert_buf = try gpu.gpuMalloc(@sizeOf([3]f32) * 3, 16, .default);
@@ -119,18 +111,18 @@ pub fn main(init: std.process.Init) !void {
     indices[2] = 1;
 
     // ── Indirect data buffer (32 draws with per-draw data) ─
-    const indirect_buf = try gpu.gpuMalloc(@sizeOf(IndirectDraw) * NUM_TRIANGLES, 16, .default);
+    const indirect_buf = try gpu.gpuMalloc(@sizeOf(IndirectDraw) * num_triangles, 16, .default);
     defer gpu.gpuFree(indirect_buf);
     const indirect_draws: [*]IndirectDraw = @ptrCast(@alignCast(indirect_buf.cpu));
 
     // ── Count buffer (separate buffer for draw count) ──────
     const draw_count_buf = try gpu.gpuMalloc(4, 4, .default);
     defer gpu.gpuFree(draw_count_buf);
-    @as(*u32, @ptrCast(@alignCast(draw_count_buf.cpu))).* = NUM_TRIANGLES;
+    @as(*u32, @ptrCast(@alignCast(draw_count_buf.cpu))).* = num_triangles;
 
     const circle_radius: f32 = 0.6;
-    for (0..NUM_TRIANGLES) |i| {
-        const angle = @as(f32, @floatFromInt(i)) / @as(f32, NUM_TRIANGLES) * std.math.pi * 2.0;
+    for (0..num_triangles) |i| {
+        const angle = @as(f32, @floatFromInt(i)) / @as(f32, num_triangles) * std.math.pi * 2.0;
         const x = @cos(angle) * circle_radius;
         const y = @sin(angle) * circle_radius;
 
@@ -158,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
     const count_buf = try gpu.gpuMalloc(@sizeOf(u32), 4, .default);
     defer gpu.gpuFree(count_buf);
     const count_ptr: *u32 = @ptrCast(@alignCast(count_buf.cpu));
-    count_ptr.* = NUM_TRIANGLES;
+    count_ptr.* = num_triangles;
 
     // ── Semaphore for frame pacing ─────────────────────────
     const frame_sem = try gpu.semaphoreCreate(0);
@@ -193,8 +185,8 @@ pub fn main(init: std.process.Init) !void {
         if (should_close) break;
 
         // Frame pacing
-        if (next_frame > FRAMES_IN_FLIGHT) {
-            gpu.semaphoreWait(frame_sem, next_frame - FRAMES_IN_FLIGHT);
+        if (next_frame > frames_in_flight) {
+            gpu.semaphoreWait(frame_sem, next_frame - frames_in_flight);
         }
 
         // Begin frame
@@ -209,8 +201,8 @@ pub fn main(init: std.process.Init) !void {
 
         // Animate: rotate triangles around the circle
         const rotation = time_sec * 0.5;
-        for (0..NUM_TRIANGLES) |i| {
-            const angle = @as(f32, @floatFromInt(i)) / @as(f32, NUM_TRIANGLES) * std.math.pi * 2.0 + rotation;
+        for (0..num_triangles) |i| {
+            const angle = @as(f32, @floatFromInt(i)) / @as(f32, num_triangles) * std.math.pi * 2.0 + rotation;
             const x = @cos(angle) * circle_radius;
             const y = @sin(angle) * circle_radius;
             indirect_draws[i].data.pos = .{ x, y, 0.0 };
@@ -239,14 +231,14 @@ pub fn main(init: std.process.Init) !void {
         cmd.bindVertexBuffer(0, vert_buf, 0);
 
         // Push constants: vert_data = pointer to VertexData, indirect = pointer to indirect buffer
-        const push = noapi.PushData{
+        const push: noapi.PushData = .{
             .vert_data = vert_data_buf.gpu,
             .indirect = indirect_buf.gpu,
         };
 
         // Draw 32 triangles using indirect multi-draw
         // stride = @sizeOf(IndirectDraw) so the GPU skips per-draw data between commands
-        cmd.drawIndexedIndirectMulti(push, idx_buf, indirect_buf, @sizeOf(IndirectDraw), draw_count_buf, 0, NUM_TRIANGLES);
+        cmd.drawIndexedIndirectMulti(push, idx_buf, indirect_buf, @sizeOf(IndirectDraw), draw_count_buf, 0, num_triangles);
 
         cmd.endRendering();
 

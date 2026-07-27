@@ -58,21 +58,6 @@ pub fn main(init: std.process.Init) !void {
     const exts_copy = try init.arena.allocator().dupe([*:0]const u8, sdl_exts);
     exts_copy_global = exts_copy;
 
-    // ── Load shader SPIR-V ────────────────────────────────
-    const gb_vert_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/gbuffer_vert.spv", gpa, .unlimited);
-    defer gpa.free(gb_vert_bytes);
-    const gb_frag_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/gbuffer_frag.spv", gpa, .unlimited);
-    defer gpa.free(gb_frag_bytes);
-    const fp_vert_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/final_pass_vert.spv", gpa, .unlimited);
-    defer gpa.free(fp_vert_bytes);
-    const fp_frag_bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/final_pass_frag.spv", gpa, .unlimited);
-    defer gpa.free(fp_frag_bytes);
-
-    const gb_vert_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, gb_vert_bytes));
-    const gb_frag_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, gb_frag_bytes));
-    const fp_vert_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, fp_vert_bytes));
-    const fp_frag_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, fp_frag_bytes));
-
     // ── GPU init ───────────────────────────────────────────
     var gpu = try noapi.Gpu.init(.{
         .frames_in_flight = frames_in_flight,
@@ -90,18 +75,18 @@ pub fn main(init: std.process.Init) !void {
     // ── Surface ────────────────────────────────────────────
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf = try noapi.Surface.init(&gpu, surface, .{ .width = start_width, .height = start_height });
+    var surf = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = start_width, .height = start_height } });
     defer surf.deinit();
 
     // ── Shaders ────────────────────────────────────────────
-    const vert_gbuffer = try gpu.shaderCreate(gb_vert_spv, .vertex, "main", "gbuffer_vert");
-    defer gpu.shaderDestroy(vert_gbuffer);
-    const frag_gbuffer = try gpu.shaderCreate(gb_frag_spv, .fragment, "main", "gbuffer_frag");
-    defer gpu.shaderDestroy(frag_gbuffer);
-    const vert_final = try gpu.shaderCreate(fp_vert_spv, .vertex, "main", "final_pass_vert");
-    defer gpu.shaderDestroy(vert_final);
-    const frag_final = try gpu.shaderCreate(fp_frag_spv, .fragment, "main", "final_pass_frag");
-    defer gpu.shaderDestroy(frag_final);
+    const vert_gbuffer = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/gbuffer_vert.spv", .vertex, "main", "gbuffer_vert");
+    defer vert_gbuffer.destroy();
+    const frag_gbuffer = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/gbuffer_frag.spv", .fragment, "main", "gbuffer_frag");
+    defer frag_gbuffer.destroy();
+    const vert_final = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/final_pass_vert.spv", .vertex, "main", "final_pass_vert");
+    defer vert_final.destroy();
+    const frag_final = try noapi.Shader.createFromPath(gpa, io, &gpu, "shaders/final_pass_frag.spv", .fragment, "main", "final_pass_frag");
+    defer frag_final.destroy();
 
     // ── Descriptor pool ─────────────────────────────────────
     var pool = try DescriptorPool.init(&gpu, 4, 0, 4);
@@ -242,7 +227,7 @@ pub fn main(init: std.process.Init) !void {
                         const names = [_][*:0]const u8{ "Albedo", "Normal", "Metallic/Roughness" };
                         var buf: [128]u8 = undefined;
                         const title = std.fmt.bufPrintZ(&buf, "Deferred Shading — G-buffer: {s}", .{names[selected_texture_type]}) catch unreachable;
-                        sdl_win.setTitle(title) catch {};
+                        sdl_win.setTitle(title) catch unreachable;
                     }
                 },
                 .window_resized => |we| {
@@ -278,9 +263,9 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Handle resize ───────────────────────────────────
-        const new_size = try sdl_win.getSizeInPixels();
-        const new_w: i32 = @intCast(new_size.@"0");
-        const new_h: i32 = @intCast(new_size.@"1");
+        const sz = surf.surfaceSize();
+        const new_w: i32 = @intCast(sz.width);
+        const new_h: i32 = @intCast(sz.height);
         if (new_w != window_w or new_h != window_h) {
             window_w = new_w;
             window_h = new_h;
@@ -508,13 +493,13 @@ fn createFullscreenQuad(allocator: std.mem.Allocator) FullscreenQuad {
 // ── G-buffer texture creation ────────────────────────────────
 
 fn createGbufferTextures(gpu: *noapi.Gpu, pool: *DescriptorPool, width: u32, height: u32, out_albedo: *noapi.Texture.OwnedTexture, out_normal: *noapi.Texture.OwnedTexture, out_mr: *noapi.Texture.OwnedTexture, out_depth: *noapi.Texture.OwnedTexture, samp_handle: u64) !void {
-    const gb_desc = noapi.TextureDesc{
+    const gb_desc: noapi.TextureDesc = .{
         .dimensions = .{ width, height, 1 },
         .format = .rgba8_unorm,
         .usage = .{ .sampled = true, .color_attachment = true, .storage = false },
     };
 
-    const depth_desc = noapi.TextureDesc{
+    const depth_desc: noapi.TextureDesc = .{
         .dimensions = .{ width, height, 1 },
         .format = .d32_float,
         .usage = .{ .depth_stencil_attachment = true, .sampled = false },
@@ -545,7 +530,7 @@ fn createGbufferTextures(gpu: *noapi.Gpu, pool: *DescriptorPool, width: u32, hei
 }
 
 fn createSolidColorTexture(gpu: *noapi.Gpu, rgba: *const [4]u8) !noapi.Texture {
-    const desc = noapi.TextureDesc{
+    const desc: noapi.TextureDesc = .{
         .dimensions = .{ 1, 1, 1 },
         .format = .rgba8_unorm,
         .usage = .{ .sampled = true },

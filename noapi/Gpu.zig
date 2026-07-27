@@ -74,6 +74,7 @@ pub fn deinit(self: *Gpu) void {
     defer zone.end();
     self.backend.flushPendingFrees();
     self.backend.deinit();
+    self.* = undefined;
 }
 
 pub fn flushPendingFrees(self: *Gpu) void {
@@ -88,7 +89,7 @@ pub fn waitIdle(self: *Gpu) void {
 
 pub fn commandsBegin(self: *Gpu) !CommandBuffer {
     const handle = try self.backend.commandsBegin();
-    return CommandBuffer{ .gpu = self, .handle = handle };
+    return .{ .gpu = self, .handle = handle };
 }
 
 pub fn commandsEnd(self: *Gpu, cmd: CommandBuffer) void {
@@ -106,14 +107,14 @@ pub fn deviceLimits(self: *const Gpu) DeviceLimits {
 // Handles are defined in their respective file-struct files.
 // Gpu re-exports them via root.zig.
 
-// ── Handle-based resource methods ────────────────────────────
+// Handle-based resource methods
 
 pub fn shaderCreate(self: *Gpu, spv: []const u32, stage: ShaderStage, entry: [:0]const u8, name: [:0]const u8) !Shader {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     _ = name;
     const handle = try self.backend.shaderCreate(spv, @intFromEnum(stage), entry);
-    return Shader{ .gpu = self, .handle = handle, .stage = stage };
+    return .{ .gpu = self, .handle = handle, .stage = stage };
 }
 
 pub fn shaderDestroy(self: *Gpu, shader: Shader) void {
@@ -125,7 +126,7 @@ pub fn shaderDestroy(self: *Gpu, shader: Shader) void {
 pub fn semaphoreCreate(self: *Gpu, initial: u64) !Semaphore {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    return Semaphore{ .gpu = self, .handle = try self.backend.semaphoreCreate(initial) };
+    return .{ .gpu = self, .handle = try self.backend.semaphoreCreate(initial) };
 }
 pub fn semaphoreDestroy(self: *Gpu, sem: Semaphore) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -135,7 +136,7 @@ pub fn semaphoreDestroy(self: *Gpu, sem: Semaphore) void {
 
 pub fn bufferCreate(self: *Gpu, desc: BufferDesc) !Buffer {
     const ptr = try self.gpuMalloc(desc.size, 64, .gpu);
-    return Buffer{ .gpu = self, .gpu_ptr = ptr };
+    return .{ .gpu = self, .gpu_ptr = ptr };
 }
 pub fn bufferDestroy(self: *Gpu, buf: Buffer) void {
     self.gpuFree(buf.gpu_ptr);
@@ -195,8 +196,14 @@ pub fn descHeapCreate(self: *Gpu, texture_count: u32, texture_rw_count: u32, sam
 pub fn descHeapDestroy(self: *Gpu, heap: DescriptorHeap) void {
     self.backend.descHeapDestroy(heap.index);
 }
-
-pub fn drawTriangles(self: *Gpu, cmd: CommandBuffer, texture: ?TextureHandle, vertices: []const Vertex, indices: []const u32, clip_rect: ?Rect) void {
+pub fn drawTriangles(
+    self: *Gpu,
+    cmd: CommandBuffer,
+    texture: ?TextureHandle,
+    vertices: []const Vertex,
+    indices: []const u32,
+    clip_rect: ?Rect,
+) void {
     if (vertices.len == 0 or indices.len == 0) return;
     const vert_bytes = @sizeOf(Vertex) * vertices.len;
     const idx_bytes = @sizeOf(u32) * indices.len;
@@ -211,9 +218,24 @@ pub fn drawTriangles(self: *Gpu, cmd: CommandBuffer, texture: ?TextureHandle, ve
 
     const bindings = [_]VertexBinding{.{ .binding = 0, .stride = @sizeOf(Vertex), .input_rate = 0 }};
     const attribs = [_]VertexAttribute{
-        .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = @offsetOf(Vertex, "position") },
-        .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = @offsetOf(Vertex, "uv") },
-        .{ .location = 2, .binding = 0, .format = @intFromEnum(vk.Format.r8g8b8a8_unorm), .offset = @offsetOf(Vertex, "color") },
+        .{
+            .location = 0,
+            .binding = 0,
+            .format = @intFromEnum(vk.Format.r32g32_sfloat),
+            .offset = @offsetOf(Vertex, "position"),
+        },
+        .{
+            .location = 1,
+            .binding = 0,
+            .format = @intFromEnum(vk.Format.r32g32_sfloat),
+            .offset = @offsetOf(Vertex, "uv"),
+        },
+        .{
+            .location = 2,
+            .binding = 0,
+            .format = @intFromEnum(vk.Format.r8g8b8a8_unorm),
+            .offset = @offsetOf(Vertex, "color"),
+        },
     };
     self.backend.cmdSetVertexInput(cmd.handle, &bindings, &attribs);
     self.backend.cmdBindVertexBuffer(cmd.handle, 0, vk_buf, vert_off);
@@ -225,8 +247,15 @@ pub fn drawTriangles(self: *Gpu, cmd: CommandBuffer, texture: ?TextureHandle, ve
         if (tex.texture.id != 0) {
             const heap = self.descHeapCreate(1, 0, 1) catch return;
             defer self.descHeapDestroy(heap);
-            const tex_view = self.textureViewDescriptor(tex, .{ .format = .default });
-            const sampler = self.samplerDescriptor(.{ .min_filter = .linear, .mag_filter = .linear, .mip_filter = .linear });
+            const tex_view = self.textureViewDescriptor(
+                tex,
+                .{ .format = .default },
+            );
+            const sampler = self.samplerDescriptor(.{
+                .min_filter = .linear,
+                .mag_filter = .linear,
+                .mip_filter = .linear,
+            });
             self.descHeapSetTextures(heap, 0, &.{tex_view});
             self.descHeapSetSamplers(heap, 0, &.{sampler});
             self.backend.cmdBindDescriptorSets(cmd.handle, heap.index);
@@ -243,8 +272,8 @@ pub fn generateMipmaps(self: *Gpu, cmd: CommandBuffer, texture: Texture) void {
         if (mip > 1) {
             self.backend.cmdBarrier(cmd.handle, .{ .transfer = true }, .{ .transfer = true }, .{});
         }
-        const src_rect = Texture.BlitRect{ .mip_level = mip - 1 };
-        const dst_rect = Texture.BlitRect{ .mip_level = mip };
+        const src_rect: Texture.BlitRect = .{ .mip_level = mip - 1 };
+        const dst_rect: Texture.BlitRect = .{ .mip_level = mip };
         self.backend.cmdBlitTexture(cmd.handle, texture.handle, dst_rect, texture.handle, src_rect, .linear);
     }
 }
@@ -252,7 +281,7 @@ pub fn generateMipmaps(self: *Gpu, cmd: CommandBuffer, texture: Texture) void {
 pub fn gpuMalloc(self: *Gpu, size: u64, alignment: u29, mem_type: MemoryType) GpuError!GpuPtr {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    if (self.backend.gpuMalloc(size, alignment, mem_type)) |ptr| return ptr else |_| return GpuError.BackendError;
+    if (self.backend.gpuMalloc(size, alignment, mem_type)) |ptr| return ptr else |_| return error.BackendError;
 }
 pub fn gpuFree(self: *Gpu, ptr: GpuPtr) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -267,7 +296,7 @@ pub fn instanceHandle(self: *const Gpu) vk.Instance {
     return self.backend.instance.handle;
 }
 
-// ── Basic types ──────────────────────────────────────────────
+// Basic types
 
 pub const FrameSchedule = struct { next_vblank_us: u32, swapchain_recreated: bool };
 pub const FrameResult = struct { gpu_blocked_ns: u64 };

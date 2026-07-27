@@ -43,6 +43,7 @@ pub fn deinit(self: *DescriptorPool) void {
     self.texture_freelist.deinit(allocator);
     self.texture_rw_freelist.deinit(allocator);
     self.sampler_freelist.deinit(allocator);
+    self.* = undefined;
 }
 
 /// Allocate a texture+sampler slot. Pops from freelist if available,

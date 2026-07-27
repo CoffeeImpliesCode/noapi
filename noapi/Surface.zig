@@ -16,25 +16,40 @@ const FrameSchedule = @import("Gpu.zig").FrameSchedule;
 const FrameResult = @import("Gpu.zig").FrameResult;
 const PresentInfo = @import("Gpu.zig").PresentInfo;
 
+pub const PresentMode = enum(u32) {
+    fifo = 0,
+    mailbox = 1,
+    immediate = 2,
+    fifo_relaxed = 3,
+};
+
+pub const SurfaceOptions = struct {
+    extent: Extent2D,
+    present_mode: PresentMode = .fifo,
+};
+
 gpu: *Gpu,
 index: u32,
 
-pub fn init(gpu: *Gpu, vk_surface: vk.SurfaceKHR, extent: Extent2D) !Surface {
-    const idx = try gpu.backend.addWindow(vk_surface, extent);
+pub fn init(gpu: *Gpu, vk_surface: vk.SurfaceKHR, options: SurfaceOptions) !Surface {
+    const idx = try gpu.backend.addWindow(vk_surface, options.extent);
     return .{ .gpu = gpu, .index = idx };
 }
 
 pub fn deinit(self: *Surface) void {
     self.gpu.backend.removeWindow(self.index);
+    self.* = undefined;
 }
 
 pub fn beginFrame(self: *Surface) !FrameSchedule {
-    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     return self.gpu.backend.beginFrame(self.index);
 }
 
 pub fn endFrame(self: *Surface, present: ?PresentInfo) FrameResult {
-    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     return self.gpu.backend.endFrame(self.index, present);
 }
 
@@ -43,7 +58,8 @@ pub fn currentImage(self: *const Surface) TextureHandle {
 }
 
 pub fn commandsBegin(self: *Surface) CommandBuffer {
-    const zone = tracy.Zone.begin(.{ .src = @src() }); defer zone.end();
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
     return .{ .gpu = self.gpu, .handle = self.gpu.backend.getCurrentCmdBuf(self.index) };
 }
 
