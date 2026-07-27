@@ -2,7 +2,6 @@
 const std = @import("std");
 const Gpu = @import("Gpu.zig");
 const TextureHandle = @import("TextureHandle.zig");
-const GpuPtr = @import("GpuPtr.zig");
 const Texture = @This();
 
 pub const TextureFormat = enum(u8) {
@@ -79,18 +78,14 @@ pub fn destroy(self: *Texture) void {
     self.gpu.textureDestroy(self.handle);
 }
 
-/// OwnedTexture pairs texture memory allocation with texture creation,
-/// and destruction with memory freeing.
+/// OwnedTexture pairs texture lifetime with memory management.
+/// Backend self-allocates memory using the image's memory_type_bits
+/// (avoids the buffer→image memory type mismatch from gpuMalloc).
 pub const OwnedTexture = struct {
     texture: Texture,
-    mem: GpuPtr,
-    gpu: *Gpu,
 
     pub fn allocAndCreate(gpu: *Gpu, desc: TextureDesc) !OwnedTexture {
-        const size_align = gpu.textureSizeAndAlign(desc);
-        const mem = try gpu.gpuMalloc(size_align.size, @intCast(size_align.alignment), .gpu);
-        errdefer gpu.gpuFree(mem);
-        const handle = try gpu.backend.textureCreate(desc, mem, 0);
+        const handle = try gpu.textureCreate(desc);
         return .{
             .texture = .{
                 .gpu = gpu,
@@ -102,14 +97,11 @@ pub const OwnedTexture = struct {
                 .layer_count = desc.layer_count,
                 .sample_count = desc.sample_count,
             },
-            .mem = mem,
-            .gpu = gpu,
         };
     }
 
     pub fn freeAndDestroy(self: *OwnedTexture) void {
-        self.gpu.textureDestroy(self.texture.handle);
-        self.gpu.gpuFree(self.mem);
+        self.texture.destroy();
     }
 };
 

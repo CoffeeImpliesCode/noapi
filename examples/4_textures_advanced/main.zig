@@ -105,8 +105,8 @@ pub fn main(init: std.process.Init) !void {
         cmd.barrier(.{ .transfer = true }, .{ .fragment = true }, .{});
         // Submit and wait for upload to complete
         // queueSubmit internally ends the CB, then submits
-        gpu.queueSubmit(&.{cmd});
-        gpu.waitIdle();
+        try gpu.queueSubmit(&.{cmd});
+        try gpu.waitIdle();
     }
 
     // ── Descriptor pool ────────────────────────────────────
@@ -214,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
         cmd.addWaitSemaphore(surf.index, test_sem, sem_val - 1);
         cmd.addSignalSemaphore(surf.index, test_sem, sem_val);
 
-        _ = surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
 
         // ── FPS output ──────────────────────────────────────
         fps_frames += 1;
@@ -231,7 +231,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    gpu.waitIdle();
+    try gpu.waitIdle();
 }
 
 /// Generate a 128×128×128 cloud volume using FBM value noise.

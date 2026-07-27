@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
 
         cmd.endRendering();
 
-        _ = surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
 
         // ── FPS output ──────────────────────────────────────
         fps_frames += 1;
@@ -165,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    gpu.waitIdle();
+    try gpu.waitIdle();
 }
 
 var exts_copy_global: []const [*:0]const u8 = &.{};

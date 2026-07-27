@@ -238,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
 
         const sz = surf.surfaceSize();
         if (sz.width == 0 or sz.height == 0) {
-            _ = surf.endFrame(.{ .blit_to_swapchain = true });
+            _ = try surf.endFrame(.{ .blit_to_swapchain = true });
             continue;
         }
         const surf_w = sz.width;
@@ -246,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
 
         // ── Resize depth texture if needed ─────────────────
         if (depth_size[0] != surf_w or depth_size[1] != surf_h) {
-            gpu.waitIdle();
+            try gpu.waitIdle();
             gpu.textureDestroy(depth_handle);
             depth_handle = try gpu.textureCreate(.{
                 .dimensions = .{ surf_w, surf_h, 1 },
@@ -397,11 +397,11 @@ pub fn main(init: std.process.Init) !void {
         frame_counter += 1;
         cmd.addSignalSemaphore(surf.index, frame_sem, frame_counter);
 
-        _ = surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
 
         // Frame pacing: wait if GPU is N frames ahead.
         if (frame_counter >= frames_in_flight) {
-            gpu.semaphoreWait(frame_sem, frame_counter - frames_in_flight + 1);
+            try gpu.semaphoreWait(frame_sem, frame_counter - frames_in_flight + 1);
         }
 
         // ── FPS output ──────────────────────────────────────
@@ -419,7 +419,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    gpu.waitIdle();
+    try gpu.waitIdle();
 }
 
 fn cross3(a: [3]f32, b: [3]f32) [3]f32 {

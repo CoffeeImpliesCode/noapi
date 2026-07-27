@@ -42,7 +42,7 @@ pub const VkBackend = @This();
 // Swapchain recreation strategy: when false, uses deviceWaitIdle (slow but
 // safe everywhere). When true, uses VK_EXT_swapchain_maintenance1 fence
 // (~10x faster, requires extension + driver support).
-const use_swapchain_maintenance1 = true;
+const use_swapchain_maintenance1 = false;
 
 // Opaque handle types that the backend uses for resources
 pub const CommandBufferHandle = vk.CommandBuffer;
@@ -104,6 +104,15 @@ pending_free: std.ArrayList(PendingFree) = .empty,
 last_depth_image: vk.Image = .null_handle,
 last_depth_format: vk.Format = .undefined,
 
+// Debug feature flags (set at creation via Options)
+enable_debug_utils: bool = false,       // VK_EXT_debug_utils object naming + labels
+enable_nv_checkpoints: bool = false,    // VK_NV_device_diagnostic_checkpoints
+enable_nv_diagnostics: bool = false,    // VK_NV_device_diagnostics_config
+enable_device_fault: bool = false,      // VK_EXT_device_fault
+
+// NVIDIA diagnostic checkpoint counter (monotonic)
+checkpoint_counter: u32 = 0,
+
 const TextureInfo = struct {
     valid: bool = true,
     image: vk.Image,
@@ -154,13 +163,17 @@ const SubmittedWork = struct {
     fence: vk.Fence,
 };
 
-pub const Options = struct {
-    app_name: [:0]const u8 = "noapi",
-    validation: bool = false,
-    frames_in_flight: u32 = 2,
-    loader: Loader = .{},
-    io: std.Io,
-    allocator: std.mem.Allocator = std.heap.page_allocator,
+    pub const Options = struct {
+        app_name: [:0]const u8 = "noapi",
+        validation: bool = false,
+        frames_in_flight: u32 = 2,
+        loader: Loader = .{},
+        io: std.Io,
+        allocator: std.mem.Allocator = std.heap.page_allocator,
+        enable_debug_utils: bool = false,
+        enable_nv_checkpoints: bool = false,
+        enable_nv_diagnostics: bool = false,
+        enable_device_fault: bool = false,
 
     pub const Loader = struct {
         get_instance_proc_addr: ?vk.PfnGetInstanceProcAddr = null,
@@ -179,6 +192,8 @@ const DeviceFeatures = struct {
     shader_object: vk.PhysicalDeviceShaderObjectFeaturesEXT = .{},
     descriptor_buffer: vk.PhysicalDeviceDescriptorBufferFeaturesEXT = .{},
     swapchain_maint1: vk.PhysicalDeviceSwapchainMaintenance1FeaturesEXT = .{},
+    diagnostics_config: void = undefined,
+    device_fault: void = undefined,
 
     fn init(self: *DeviceFeatures) void {
         self.vk10.features.shader_int_64 = .true;
@@ -187,8 +202,12 @@ const DeviceFeatures = struct {
         self.vk11.p_next = @constCast(&self.vk12);
         self.vk10.p_next = @constCast(&self.vk11);
         self.vk12 = .{
+            .descriptor_indexing = .true,
             .runtime_descriptor_array = .true,
             .shader_sampled_image_array_non_uniform_indexing = .true,
+            .shader_storage_image_array_non_uniform_indexing = .true,
+            .shader_uniform_buffer_array_non_uniform_indexing = .true,
+            .shader_storage_buffer_array_non_uniform_indexing = .true,
             .descriptor_binding_sampled_image_update_after_bind = .true,
             .descriptor_binding_storage_image_update_after_bind = .true,
             .descriptor_binding_partially_bound = .true,
@@ -247,6 +266,9 @@ const required_device_extensions = [_][*:0]const u8{
 } ++ if (use_swapchain_maintenance1) [_][*:0]const u8{
     "VK_EXT_swapchain_maintenance1",
 } else [_][*:0]const u8{};
+// Base extensions included unconditionally. Debug/NV/device-fault extensions
+// are appended at runtime by init() based on options. See init() for the
+// dev_exts ArrayList that replaces this constant at device creation time.
 
 // Push constant layouts (matches no_gfx_api Graphics_Shader_Push_Constants)
 const GraphicsPushConstants = extern struct {
@@ -262,6 +284,10 @@ pub fn init(options: Options) !VkBackend {
     const alloc = options.allocator;
     var self: VkBackend = .{ .allocator = alloc, .io = options.io };
     self.frames_in_flight = options.frames_in_flight;
+    self.enable_debug_utils = options.enable_debug_utils;
+    self.enable_nv_checkpoints = options.enable_nv_checkpoints;
+    self.enable_nv_diagnostics = options.enable_nv_diagnostics;
+    self.enable_device_fault = options.enable_device_fault;
     self.texture_view_cache = std.AutoHashMap(u64, vk.ImageView).init(alloc);
     self.sampler_cache = std.AutoHashMap(u64, vk.Sampler).init(alloc);
 
@@ -288,7 +314,7 @@ pub fn init(options: Options) !VkBackend {
         try enabled_extensions.append(alloc, "VK_KHR_xlib_surface");
     }
     try enabled_extensions.append(alloc, "VK_KHR_surface");
-    if (options.validation) try enabled_extensions.append(alloc, "VK_EXT_debug_utils");
+    if (options.validation or options.enable_debug_utils) try enabled_extensions.append(alloc, "VK_EXT_debug_utils");
     if (use_swapchain_maintenance1) {
         try enabled_extensions.append(alloc, "VK_KHR_get_surface_capabilities2");
         try enabled_extensions.append(alloc, "VK_EXT_surface_maintenance1");
@@ -410,13 +436,49 @@ pub fn init(options: Options) !VkBackend {
         .p_queue_priorities = q_prio[0..].ptr,
         .queue_count = 1,
     };
+    // Build device extension list at runtime based on feature flags.
+    var dev_exts = std.ArrayList([*:0]const u8).empty;
+    defer dev_exts.deinit(alloc);
+    try dev_exts.appendSlice(alloc, &required_device_extensions);
+    if (options.enable_debug_utils) try dev_exts.append(alloc, "VK_EXT_debug_utils");
+    if (options.enable_nv_checkpoints) try dev_exts.append(alloc, "VK_NV_device_diagnostic_checkpoints");
+    if (options.enable_nv_diagnostics) try dev_exts.append(alloc, "VK_NV_device_diagnostics_config");
+    if (options.enable_device_fault) try dev_exts.append(alloc, "VK_EXT_device_fault");
+
+    // NVIDIA diagnostics config for device crash breadcrumbs.
+    // Must be chained DIRECTLY to VkDeviceCreateInfo.pNext (NOT inside the features chain).
+    var nv_diag_config: ?vk.DeviceDiagnosticsConfigCreateInfoNV = null;
+    if (options.enable_nv_diagnostics) {
+        nv_diag_config = .{
+            .flags = .{ .enable_automatic_checkpoints_bit_nv = true },
+            .p_next = @ptrCast(&features.vk10),
+        };
+    }
+
     const device_ci: vk.DeviceCreateInfo = .{
-        .p_next = @ptrCast(&features.vk10),
+        .p_next = if (nv_diag_config) |*cfg| @ptrCast(cfg) else @ptrCast(&features.vk10),
         .p_queue_create_infos = &.{queue_ci},
         .queue_create_info_count = 1,
-        .pp_enabled_extension_names = &required_device_extensions,
-        .enabled_extension_count = required_device_extensions.len,
+        .pp_enabled_extension_names = dev_exts.items.ptr,
+        .enabled_extension_count = @intCast(dev_exts.items.len),
     };
+    // DIAG: enumerate available device extensions to verify required ones
+    {
+        const avail_exts = try self.instance.enumerateDeviceExtensionPropertiesAlloc(self.physical_device, null, alloc);
+        defer alloc.free(avail_exts);
+        for (dev_exts.items) |req| {
+            const req_name = std.mem.sliceTo(req, 0);
+            const found = for (avail_exts) |avail| {
+                const avail_name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&avail.extension_name)), 0);
+                if (std.mem.eql(u8, req_name, avail_name)) break true;
+            } else false;
+            if (found) {
+                log.info("DIAG: device extension AVAILABLE: {s}", .{req});
+            } else {
+                log.warn("DIAG: device extension NOT AVAILABLE: {s}", .{req});
+            }
+        }
+    }
     const device_handle = try self.instance.createDevice(self.physical_device, &device_ci, null);
     self.vkd = vk.DeviceWrapper.load(device_handle, self.vki.dispatch.vkGetDeviceProcAddr.?);
     self.device = vk.DeviceProxy{ .handle = device_handle, .wrapper = &self.vkd };
@@ -433,6 +495,7 @@ pub fn init(options: Options) !VkBackend {
         }) },
         null,
     );
+    self.setDebugName(.semaphore, @intFromEnum(self.queue_sem), "queue_sem");
     log.info("Queue timeline semaphore created", .{});
 
     // Offscreen command pool (transient, for one-shot command buffers)
@@ -440,6 +503,7 @@ pub fn init(options: Options) !VkBackend {
         .queue_family_index = self.queue_family_index,
         .flags = .{ .transient_bit = true },
     }, null);
+    self.setDebugName(.command_pool, @intFromEnum(self.offscreen_cmd_pool), "offscreen_cmd_pool");
     log.info("Offscreen command pool created", .{});
 
     // Command buffer lifecycle tracking (fence-based recycling)
@@ -458,19 +522,21 @@ pub fn init(options: Options) !VkBackend {
         };
         const binding_types = [_]vk.DescriptorType{ .sampled_image, .storage_image, .sampler };
         const binding_counts = [_]u32{ max_textures, max_textures, max_samplers };
-        for (&binding_types, &binding_counts, 0..) |dtype, dcount, i| {
+        const layout_labels = [_][:0]const u8{ "desc_layout_sampled", "desc_layout_storage", "desc_layout_sampler" };
+        for (&binding_types, &binding_counts, &self.desc_layouts, &layout_labels) |dtype, dcount, *layout, label| {
             const bnd: vk.DescriptorSetLayoutBinding = .{
                 .binding = 0,
                 .descriptor_type = dtype,
                 .descriptor_count = dcount,
                 .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
             };
-            self.desc_layouts[i] = try self.device.createDescriptorSetLayout(&.{
+            layout.* = try self.device.createDescriptorSetLayout(&.{
                 .p_next = @constCast(&flags),
                 .flags = .{ .update_after_bind_pool_bit = true },
                 .binding_count = 1,
                 .p_bindings = @ptrCast(&[_]vk.DescriptorSetLayoutBinding{bnd}),
             }, null);
+            self.setDebugName(.descriptor_set_layout, @intFromEnum(layout.*), label);
         }
         log.info("Descriptor set layouts created", .{});
     }
@@ -499,6 +565,8 @@ pub fn init(options: Options) !VkBackend {
             .set_layout_count = 3,
             .p_set_layouts = @ptrCast(&self.desc_layouts),
         }, null);
+        self.setDebugName(.pipeline_layout, @intFromEnum(self.pipeline_layout_graphics), "pipeline_layout_gfx");
+        self.setDebugName(.pipeline_layout, @intFromEnum(self.pipeline_layout_compute), "pipeline_layout_comp");
         log.info("Pipeline layouts created", .{});
     }
 
@@ -506,12 +574,22 @@ pub fn init(options: Options) !VkBackend {
 }
 
 /// Drain the pending-free list: one deviceWaitIdle, then destroy all deferred resources.
-pub fn flushPendingFrees(self: *VkBackend) void {
+pub fn flushPendingFrees(self: *VkBackend) !void {
     if (self.pending_free.items.len == 0) return;
     {
         const zone_dwi = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
         defer zone_dwi.end();
-        self.device.deviceWaitIdle() catch |err| log.warn("flushPendingFrees: deviceWaitIdle failed: {}", .{err});
+        self.device.deviceWaitIdle() catch |err| {
+            log.warn("flushPendingFrees: deviceWaitIdle failed: {}", .{err});
+            if (self.enable_nv_checkpoints) {
+                const last_cp = self.queryLastCheckpoint();
+                log.warn("flushPendingFrees: last NVIDIA checkpoint marker={}", .{last_cp});
+            }
+            if (self.enable_device_fault) {
+                self.queryDeviceFault();
+            }
+            return err;
+        };
     }
     for (self.pending_free.items) |pf| {
         switch (pf) {
@@ -626,9 +704,14 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
             try createPresentSemaphores(self, w);
             if (use_swapchain_maintenance1) {
                 try w.present_done_fences.ensureTotalCapacity(self.allocator, self.frames_in_flight);
-                for (0..self.frames_in_flight) |_| {
-                    const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
-                    w.present_done_fences.appendAssumeCapacity(fence);
+                {
+                    var name_buf: [64]u8 = undefined;
+                    for (0..self.frames_in_flight) |f| {
+                        const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+                        const fname = std.fmt.bufPrintZ(&name_buf, "present_fence[{}]", .{f}) catch "present_fence";
+                        self.setDebugName(.fence, @intFromEnum(fence), fname);
+                        w.present_done_fences.appendAssumeCapacity(fence);
+                    }
                 }
             }
             try createPerFrameResources(self, w);
@@ -651,9 +734,14 @@ pub fn addWindow(self: *VkBackend, surface: vk.SurfaceKHR, initial_extent: Exten
     try createPresentSemaphores(self, &win);
     if (use_swapchain_maintenance1) {
         try win.present_done_fences.ensureTotalCapacity(self.allocator, self.frames_in_flight);
-        for (0..self.frames_in_flight) |_| {
-            const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
-            win.present_done_fences.appendAssumeCapacity(fence);
+        {
+            var name_buf: [64]u8 = undefined;
+            for (0..self.frames_in_flight) |f| {
+                const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+                const fname = std.fmt.bufPrintZ(&name_buf, "present_fence[{}]", .{f}) catch "present_fence";
+                self.setDebugName(.fence, @intFromEnum(fence), fname);
+                win.present_done_fences.appendAssumeCapacity(fence);
+            }
         }
     }
     log.info("addWindow: createPerFrameResources", .{});
@@ -691,17 +779,16 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
             for (win.present_done_fences.items) |f| {
                 const zone_wf_resize = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
                 defer zone_wf_resize.end();
-                _ = self.device.waitForFences(
+                _ = try self.device.waitForFences(
                     &[_]vk.Fence{f},
                     .true,
                     std.math.maxInt(u64),
-                ) catch |err|
-                    log.warn("beginFrame: waitForFences failed: {}", .{err});
+                );
             }
         } else {
             const zone_dwi_bf = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
             defer zone_dwi_bf.end();
-            self.device.deviceWaitIdle() catch |err| log.warn("beginFrame: deviceWaitIdle failed: {}", .{err});
+            try self.device.deviceWaitIdle();
         }
         try recreateSwapchain(self, win);
         win.needs_resize = false;
@@ -741,15 +828,19 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     {
         const zone_rcp = tracy.Zone.begin(.{ .name = "resetCmdPool", .src = @src(), .color = .tomato });
         defer zone_rcp.end();
-        _ = self.device.resetCommandPool(win.cmd_pools.items[frame], .{}) catch |err|
-            log.warn("beginFrame: resetCommandPool failed: {}", .{err});
+        try self.device.resetCommandPool(win.cmd_pools.items[frame], .{});
     }
 
-    self.flushPendingFrees();
+    try self.flushPendingFrees();
 
     // Begin command buffer and transition UNDEFINED -> GENERAL
     win.cmd_buffers.items[frame].beginCommandBuffer(&.{ .flags = .{ .one_time_submit_bit = true } }) catch |err|
         log.err("beginFrame: beginCommandBuffer failed: {}", .{err});
+    {
+        var name_buf: [64]u8 = undefined;
+        const label = std.fmt.bufPrintZ(&name_buf, "Frame {}", .{self.queue_counter}) catch "Frame";
+        self.cmdBeginDebugLabel(win.cmd_buffers.items[frame].handle, label, .{ 0.2, 0.6, 1.0, 1.0 });
+    }
     {
         const barrier: vk.ImageMemoryBarrier2 = .{
             .image = win.images.items[win.image_index],
@@ -786,10 +877,12 @@ pub fn currentSwapchainImage(self: *const VkBackend, window_index: u32) TextureH
     };
 }
 
-pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) FrameResult {
+pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !FrameResult {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
     const img_idx = win.image_index;
+
+    self.cmdInsertDebugLabel(win.cmd_buffers.items[frame].handle, "Present", .{ 0.2, 0.4, 0.8, 1.0 });
 
     // Transition GENERAL -> PRESENT_SRC_KHR
     {
@@ -817,8 +910,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
         });
     }
 
-    win.cmd_buffers.items[frame].endCommandBuffer() catch |err|
-        log.err("endFrame: endCommandBuffer failed: {}", .{err});
+    try win.cmd_buffers.items[frame].endCommandBuffer();
 
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
@@ -880,7 +972,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
     {
         const zone_qs = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
         defer zone_qs.end();
-        self.queue.submit(&.{vk.SubmitInfo{
+        try self.queue.submit(&.{vk.SubmitInfo{
             .p_next = @constCast(&ts_info),
             .command_buffer_count = 1,
             .p_command_buffers = @ptrCast(&cb_handle),
@@ -889,10 +981,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
             .p_wait_dst_stage_mask = &stage_mask_buf,
             .signal_semaphore_count = sc,
             .p_signal_semaphores = &signal_sems_buf,
-        }}, win.cmd_pool_ready.items[frame]) catch |e| {
-            log.err("endFrame: queue.submit failed: {}", .{e});
-            return .{ .gpu_blocked_ns = 0 };
-        };
+        }}, win.cmd_pool_ready.items[frame]);
     }
     // Clear per-frame semaphore arrays for next use
     win.wait_sems.items[frame].clearRetainingCapacity();
@@ -909,14 +998,12 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) Fram
                 // Wait for this frame's previous present to complete
                 const zone_wf_p = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
                 defer zone_wf_p.end();
-                _ = self.device.waitForFences(
+                _ = try self.device.waitForFences(
                     &[_]vk.Fence{pfence},
                     .true,
                     std.math.maxInt(u64),
-                ) catch |err|
-                    log.warn("present: waitForFences failed: {}", .{err});
-                self.device.resetFences(&[_]vk.Fence{pfence}) catch |err|
-                    log.warn("present: resetFences failed: {}", .{err});
+                );
+                try self.device.resetFences(&[_]vk.Fence{pfence});
                 fence_info = .{ .swapchain_count = 1, .p_fences = @ptrCast(&pfence) };
                 break :blk vk.PresentInfoKHR{
                     .p_next = @ptrCast(&fence_info),
@@ -959,23 +1046,35 @@ pub fn getCurrentCmdBuf(self: *VkBackend, window_index: u32) CommandBufferHandle
     return win.cmd_buffers.items[win.frame_index].handle;
 }
 
-pub fn waitIdle(self: *VkBackend) void {
+pub fn waitIdle(self: *VkBackend) !void {
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
     const zone_dwi_w = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
     defer zone_dwi_w.end();
-    self.device.deviceWaitIdle() catch |err| log.warn("waitIdle: deviceWaitIdle failed: {}", .{err});
+    self.device.deviceWaitIdle() catch |err| {
+        log.warn("waitIdle: deviceWaitIdle failed: {}", .{err});
+        if (self.enable_nv_checkpoints) {
+            const last_cp = self.queryLastCheckpoint();
+            log.warn("waitIdle: last NVIDIA checkpoint marker={}", .{last_cp});
+        }
+        return err;
+    };
 }
 
-pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) void {
-    for (handles) |h| self.device.endCommandBuffer(h) catch |err|
-        log.warn("queueSubmit: endCommandBuffer failed: {}", .{err});
+pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) !void {
+    // NVIDIA checkpoint: set breadcrumb before each submission
+    if (self.enable_nv_checkpoints) {
+        for (handles) |h| {
+            self.checkpoint_counter += 1;
+            const cp = self.checkpoint_counter;
+            self.device.cmdSetCheckpointNV(h, @ptrCast(&cp));
+        }
+    }
+    for (handles) |h| try self.device.endCommandBuffer(h);
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
-    const fence = self.device.createFence(&.{}, null) catch |err| {
-        log.warn("queueSubmit: createFence failed: {}", .{err});
-        return;
-    };
+    const fence = try self.device.createFence(&.{}, null);
+    errdefer self.device.destroyFence(fence, null);
     const si: vk.SubmitInfo = .{
         .command_buffer_count = @intCast(handles.len),
         .p_command_buffers = handles.ptr,
@@ -983,23 +1082,139 @@ pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) void 
     {
         const zone_qs = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
         defer zone_qs.end();
-        self.queue.submit(&.{si}, fence) catch |err| {
-            log.warn("queueSubmit: submit failed: {}", .{err});
-            self.device.destroyFence(fence, null);
-            return;
-        };
+        try self.queue.submit(&.{si}, fence);
     }
-    const cmds_copy = self.allocator.dupe(vk.CommandBuffer, handles) catch |err| {
-        log.warn("queueSubmit: dupe failed: {}", .{err});
-        self.device.destroyFence(fence, null);
-        return;
+    const cmds_copy = try self.allocator.dupe(vk.CommandBuffer, handles);
+    errdefer self.allocator.free(cmds_copy);
+    try self.submitted_work.append(self.allocator, .{ .cmds = cmds_copy, .fence = fence });
+}
+
+/// Set an NVIDIA diagnostic checkpoint in a command buffer.
+/// After DeviceLost, queryCheckpointData() returns the last checkpoint reached.
+pub fn setCheckpoint(self: *VkBackend, cmd: CommandBufferHandle) void {
+    if (!self.enable_nv_checkpoints) return;
+    self.checkpoint_counter += 1;
+    const cp = self.checkpoint_counter;
+    self.device.cmdSetCheckpointNV(cmd, @ptrCast(&cp));
+}
+
+/// Human-readable name for a Vulkan pipeline stage bit (PipelineStageFlags2).
+fn stageName(stage: vk.PipelineStageFlags) [:0]const u8 {
+    if (stage.top_of_pipe_bit) return "TOP_OF_PIPE";
+    if (stage.draw_indirect_bit) return "DRAW_INDIRECT";
+    if (stage.vertex_input_bit) return "VERTEX_INPUT";
+    if (stage.vertex_shader_bit) return "VERTEX_SHADER";
+    if (stage.tessellation_control_shader_bit) return "TESSELLATION_CONTROL";
+    if (stage.tessellation_evaluation_shader_bit) return "TESSELLATION_EVAL";
+    if (stage.geometry_shader_bit) return "GEOMETRY_SHADER";
+    if (stage.fragment_shader_bit) return "FRAGMENT_SHADER";
+    if (stage.early_fragment_tests_bit) return "EARLY_FRAGMENT_TESTS";
+    if (stage.late_fragment_tests_bit) return "LATE_FRAGMENT_TESTS";
+    if (stage.color_attachment_output_bit) return "COLOR_ATTACHMENT_OUTPUT";
+    if (stage.compute_shader_bit) return "COMPUTE_SHADER";
+    if (stage.transfer_bit) return "TRANSFER";
+    if (stage.bottom_of_pipe_bit) return "BOTTOM_OF_PIPE";
+    if (stage.host_bit) return "HOST";
+    if (stage.all_commands_bit) return "ALL_COMMANDS";
+    if (stage.mesh_shader_bit_ext) return "MESH_SHADER_EXT";
+    if (stage.task_shader_bit_ext) return "TASK_SHADER_EXT";
+    return "UNKNOWN";
+}
+
+/// Human-readable name for DeviceFaultAddressTypeEXT.
+fn addressTypeName(t: vk.DeviceFaultAddressTypeEXT) [:0]const u8 {
+    return switch (t) {
+        .none_ext => "NONE",
+        .read_invalid_ext => "READ_INVALID",
+        .write_invalid_ext => "WRITE_INVALID",
+        .execute_invalid_ext => "EXECUTE_INVALID",
+        .instruction_pointer_unknown_ext => "INSTR_PTR_UNKNOWN",
+        .instruction_pointer_invalid_ext => "INSTR_PTR_INVALID",
+        .instruction_pointer_fault_ext => "INSTR_PTR_FAULT",
+        _ => "UNKNOWN",
     };
-    self.submitted_work.append(self.allocator, .{ .cmds = cmds_copy, .fence = fence }) catch |err| {
-        log.warn("queueSubmit: append submitted_work failed: {}", .{err});
-        self.allocator.free(cmds_copy);
-        self.device.destroyFence(fence, null);
-        return;
-    };
+}
+
+/// Query and log VK_EXT_device_fault info after device loss.
+/// Provides the driver's free-form fault description and any fault addresses.
+pub fn queryDeviceFault(self: *VkBackend) void {
+    if (!self.enable_device_fault) return;
+    log.warn("═══ DEVICE FAULT ═══", .{});
+    var counts: vk.DeviceFaultCountsEXT = .{};
+    if (self.device.getDeviceFaultInfoEXT(&counts, null)) |_| {
+        log.warn("  Fault info available: {d} addresses, {d} vendor records, {d} bytes vendor binary", .{
+            counts.address_info_count, counts.vendor_info_count, @as(u64, counts.vendor_binary_size),
+        });
+        var vendor_infos: [4]vk.DeviceFaultVendorInfoEXT = undefined;
+        var addr_infos: [16]vk.DeviceFaultAddressInfoEXT = undefined;
+        var info: vk.DeviceFaultInfoEXT = undefined;
+        for (&info.description) |*c| c.* = 0;
+        info.s_type = .device_fault_info_ext;
+        info.p_next = null;
+        counts.address_info_count = addr_infos.len;
+        counts.vendor_info_count = vendor_infos.len;
+        info.p_vendor_infos = @ptrCast(&vendor_infos[0]);
+        info.p_address_infos = @ptrCast(&addr_infos[0]);
+        if (self.device.getDeviceFaultInfoEXT(&counts, &info)) |_| {
+            const desc = std.mem.sliceTo(&info.description, 0);
+            if (desc.len > 0) log.warn("  Description: {s}", .{desc});
+            const vc = @min(counts.vendor_info_count, vendor_infos.len);
+            if (vc > 0) {
+                log.warn("  Vendor info ({d})", .{vc});
+                for (vendor_infos[0..vc]) |vi| {
+                    const vd = std.mem.sliceTo(&vi.description, 0);
+                    log.warn("    [{s}] code=0x{x} data=0x{x}", .{ vd, vi.vendor_fault_code, vi.vendor_fault_data });
+                }
+            }
+            const ac = @min(counts.address_info_count, addr_infos.len);
+            if (ac > 0) {
+                log.warn("  Fault addresses ({d})", .{ac});
+                for (addr_infos[0..ac]) |ai| {
+                    const atype = addressTypeName(ai.address_type);
+                    log.warn("    [{s}] addr=0x{x} precision={d} bytes", .{ atype, ai.reported_address, @as(u64, ai.address_precision) });
+                }
+            } else {
+                log.warn("  No address info — fault may be a TDR timeout, not a page fault", .{});
+            }
+        } else |e| {
+            log.warn("  Query failed: {}", .{e});
+        }
+    } else |e| {
+        log.warn("  Query not available (device not lost or extension not supported): {}", .{e});
+    }
+}
+
+/// Query and log NVIDIA checkpoint data after device loss.
+/// Returns the last checkpoint value that was reached by the GPU before the fault.
+pub fn queryLastCheckpoint(self: *VkBackend) u32 {
+    if (!self.enable_nv_checkpoints) return 0;
+    var data_count: u32 = 0;
+    self.device.getQueueCheckpointDataNV(self.queue.handle, &data_count, null);
+    log.warn("═══ NVIDIA GPU CHECKPOINTS ═══", .{});
+    if (data_count > 0) {
+        const count = @min(data_count, 64);
+        var data: [64]vk.CheckpointDataNV = undefined;
+        for (&data) |*d| {
+            d.* = .{ .s_type = .checkpoint_data_nv, .p_next = null, .stage = .{}, .p_checkpoint_marker = @ptrCast(&d.stage) };
+        }
+        var query_count: u32 = count;
+        self.device.getQueueCheckpointDataNV(self.queue.handle, &query_count, &data);
+        log.warn("  stage        pipeline                         marker", .{});
+        log.warn("  ------------  ------------------------------  --------", .{});
+        for (data[0..count]) |*cp| {
+            const marker_ptr: *align(1) const u32 = @ptrCast(cp.p_checkpoint_marker);
+            const marker: u32 = marker_ptr.*;
+            const sname = stageName(cp.stage);
+            log.warn("  stage=0x{x:0>8}  {s:<30}  0x{x}", .{ @as(u32, @bitCast(cp.stage)), sname, marker });
+        }
+        log.warn("  GPU fault occurred between the highest completed stage and the next", .{});
+        const last = data[count - 1];
+        const marker_ptr: *align(1) const u32 = @ptrCast(last.p_checkpoint_marker);
+        const marker: u32 = marker_ptr.*;
+        return marker;
+    }
+    log.warn("  No checkpoints found — GPU fault before any checkpoint was reached.", .{});
+    return 0;
 }
 
 pub fn queueSubmitSignal(
@@ -1007,7 +1222,7 @@ pub fn queueSubmitSignal(
     handles: []const CommandBufferHandle,
     sem: SemaphoreHandle,
     value: u64,
-) void {
+) !void {
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
     const ts: vk.TimelineSemaphoreSubmitInfo = .{
@@ -1025,7 +1240,7 @@ pub fn queueSubmitSignal(
     {
         const zone_qss = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
         defer zone_qss.end();
-        self.queue.submit(&.{si}, .null_handle) catch |err| log.warn("queueSubmitSignal: submit failed: {}", .{err});
+        try self.queue.submit(&.{si}, .null_handle);
     }
 }
 
@@ -1064,12 +1279,12 @@ pub fn commandsEnd(self: *VkBackend, cmd: CommandBufferHandle) void {
     self.free_cmd_bufs.append(self.allocator, cmd) catch |err| log.warn("commandsEnd: append failed: {}", .{err});
 }
 
-pub fn queueWaitIdle(self: *VkBackend) void {
+pub fn queueWaitIdle(self: *VkBackend) !void {
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
     const zone_qw = tracy.Zone.begin(.{ .name = "queueWait", .src = @src(), .color = .tomato });
     defer zone_qw.end();
-    self.queue.waitIdle() catch |err| log.warn("queueWaitIdle: waitIdle failed: {}", .{err});
+    try self.queue.waitIdle();
 }
 
 pub fn shaderCreate(self: *VkBackend, spv: []const u32, stage: u2, entry: [:0]const u8) !ShaderHandle {
@@ -1110,6 +1325,12 @@ pub fn shaderCreate(self: *VkBackend, spv: []const u32, stage: u2, entry: [:0]co
         null,
         &shader_out,
     );
+    {
+        var name_buf: [64]u8 = undefined;
+        const stage_name = switch (stage) { 0 => "vert", 1 => "frag", else => "comp" };
+        const sname = std.fmt.bufPrintZ(&name_buf, "shader_{s}_{s}", .{ stage_name, entry }) catch "shader";
+        self.setDebugName(.shader_ext, @intFromEnum(shader_out[0]), sname);
+    }
     return shader_out[0];
 }
 
@@ -1235,6 +1456,7 @@ pub fn cmdDrawIndexed(
     first_index: u32,
     vertex_offset: i32,
 ) void {
+    self.cmdInsertDebugLabel(cmd, "DrawIndexed", .{ 1.0, 0.8, 0.2, 1.0 });
     self.device.cmdDrawIndexed(cmd, index_count, instance_count, first_index, vertex_offset, 0);
 }
 
@@ -1361,6 +1583,8 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
         0;
 
     var color_attach: [8]vk.RenderingAttachmentInfo = undefined;
+    // Zero out inactive entries so the validation layer doesn't see garbage image_views
+    for (&color_attach) |*ca| ca.* = .{ .image_view = .null_handle, .image_layout = .undefined, .resolve_mode = .{}, .resolve_image_layout = .undefined, .load_op = .dont_care, .store_op = .dont_care, .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } } };
     const color_count: u32 = @intCast(desc.color_attachments.len);
     if (color_count > 8) {
         log.warn("cmdBeginRendering: color_attachment count {} exceeds max 8, clamping", .{color_count});
@@ -1443,6 +1667,7 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
         };
     }
 
+    self.cmdInsertDebugLabel(cmd, "RenderPass", .{ 0.3, 0.8, 0.3, 1.0 });
     self.device.cmdBeginRendering(cmd, &.{
         .render_area = .{
             .offset = .{ .x = desc.render_area_offset[0], .y = desc.render_area_offset[1] },
@@ -1475,23 +1700,28 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
     self.device.cmdSetSampleMaskEXT(cmd, .{ .@"1_bit" = true }, @ptrCast(&sample_mask));
     self.device.cmdSetAlphaToCoverageEnableEXT(cmd, @as(vk.Bool32, .false));
     {
-        const blend_enables = [_]vk.Bool32{@as(vk.Bool32, .false)};
-        self.device.cmdSetColorBlendEnableEXT(cmd, 0, &blend_enables);
+        var blend_enables: [8]vk.Bool32 = undefined;
+        @memset(blend_enables[0..color_attach_count], @as(vk.Bool32, .false));
+        self.device.cmdSetColorBlendEnableEXT(cmd, 0, blend_enables[0..color_attach_count]);
     }
     {
-        const color_masks = [_]vk.ColorComponentFlags{.{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true }};
-        self.device.cmdSetColorWriteMaskEXT(cmd, 0, &color_masks);
+        var color_masks: [8]vk.ColorComponentFlags = undefined;
+        @memset(color_masks[0..color_attach_count], .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true });
+        self.device.cmdSetColorWriteMaskEXT(cmd, 0, color_masks[0..color_attach_count]);
     }
     {
-        const blend_eq = [_]vk.ColorBlendEquationEXT{.{
-            .src_color_blend_factor = .src_alpha,
-            .dst_color_blend_factor = .one_minus_src_alpha,
-            .color_blend_op = .add,
-            .src_alpha_blend_factor = .one,
-            .dst_alpha_blend_factor = .one_minus_src_alpha,
-            .alpha_blend_op = .add,
-        }};
-        self.device.cmdSetColorBlendEquationEXT(cmd, 0, &blend_eq);
+        var blend_eqs: [8]vk.ColorBlendEquationEXT = undefined;
+        for (blend_eqs[0..color_attach_count]) |*e| {
+            e.* = .{
+                .src_color_blend_factor = .src_alpha,
+                .dst_color_blend_factor = .one_minus_src_alpha,
+                .color_blend_op = .add,
+                .src_alpha_blend_factor = .one,
+                .dst_alpha_blend_factor = .one_minus_src_alpha,
+                .alpha_blend_op = .add,
+            };
+        }
+        self.device.cmdSetColorBlendEquationEXT(cmd, 0, blend_eqs[0..color_attach_count]);
     }
     const viewport: vk.Viewport = .{
         .x = 0,
@@ -1537,6 +1767,8 @@ pub fn cmdEndRendering(self: *VkBackend, cmd: CommandBufferHandle) void {
 }
 
 pub fn cmdBeginDebugLabel(self: *VkBackend, cmd: CommandBufferHandle, name: [:0]const u8, color: [4]f32) void {
+    if (!self.enable_debug_utils) return;
+    if (self.debug_messenger == .null_handle) return;
     self.device.cmdBeginDebugUtilsLabelEXT(cmd, @ptrCast(&vk.DebugUtilsLabelEXT{
         .p_label_name = name,
         .color = color,
@@ -1544,7 +1776,31 @@ pub fn cmdBeginDebugLabel(self: *VkBackend, cmd: CommandBufferHandle, name: [:0]
 }
 
 pub fn cmdEndDebugLabel(self: *VkBackend, cmd: CommandBufferHandle) void {
+    if (!self.enable_debug_utils) return;
+    if (self.debug_messenger == .null_handle) return;
     self.device.cmdEndDebugUtilsLabelEXT(cmd);
+}
+
+/// Insert a single-point debug label in a command buffer. No-op if debug messenger not active.
+pub fn cmdInsertDebugLabel(self: *VkBackend, cmd: CommandBufferHandle, name: [:0]const u8, color: [4]f32) void {
+    if (!self.enable_debug_utils) return;
+    if (self.debug_messenger == .null_handle) return;
+    const label = vk.DebugUtilsLabelEXT{ .p_label_name = name, .color = color };
+    self.device.cmdInsertDebugUtilsLabelEXT(cmd, &label);
+}
+
+/// Set debug name for a Vulkan object. No-op if debug messenger not active.
+pub fn setDebugName(self: *VkBackend, object_type: vk.ObjectType, handle: u64, name: [:0]const u8) void {
+    if (!self.enable_debug_utils) return;
+    if (self.debug_messenger == .null_handle) return;
+    const info = vk.DebugUtilsObjectNameInfoEXT{
+        .object_type = object_type,
+        .object_handle = handle,
+        .p_object_name = name,
+    };
+    self.device.setDebugUtilsObjectNameEXT(&info) catch {
+        // Silently ignore if the extension is not available
+    };
 }
 
 pub fn cmdAddWaitSemaphore(self: *VkBackend, window_index: u32, sem: SemaphoreHandle, value: u64) void {
@@ -1604,12 +1860,11 @@ fn recreateSwapchain(self: *VkBackend, win: *Window) !void {
         for (win.present_done_fences.items) |f| {
             const zone_wf_rs = tracy.Zone.begin(.{ .name = "waitFences", .src = @src(), .color = .tomato });
             defer zone_wf_rs.end();
-            _ = self.device.waitForFences(
+            _ = try self.device.waitForFences(
                 &[_]vk.Fence{f},
                 .true,
                 std.math.maxInt(u64),
-            ) catch |err|
-                log.warn("recreateSwapchain: waitForFences failed: {}", .{err});
+            );
         }
     } else {
         // deviceWaitIdle: Khronos-recommended workaround for spec bug #1678.
@@ -1617,7 +1872,15 @@ fn recreateSwapchain(self: *VkBackend, win: *Window) !void {
         // with old swapchain images. deviceWaitIdle is the only safe fallback.
         const zone_dwi_rs = tracy.Zone.begin(.{ .name = "deviceWait", .src = @src(), .color = .tomato });
         defer zone_dwi_rs.end();
-        self.device.deviceWaitIdle() catch |err| log.warn("recreateSwapchain: deviceWaitIdle failed: {}", .{err});
+        try self.device.deviceWaitIdle();
+        // Destroy old swapchain + views immediately (Odin pattern).
+        // Passing old_swapchain to createSwapchainKHR can trigger driver faults
+        // on some NVIDIA + Wayland configurations.
+        for (win.views.items) |v| self.device.destroyImageView(v, null);
+        win.views.clearRetainingCapacity();
+        win.images.clearRetainingCapacity();
+        self.device.destroySwapchainKHR(win.swapchain, null);
+        win.swapchain = .null_handle;
     }
     // Destroy present semaphores
     for (win.present_sems.items) |s| self.device.destroySemaphore(s, null);
@@ -1698,6 +1961,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
         .old_swapchain = old_swapchain,
     };
     win.swapchain = try self.device.createSwapchainKHR(&swapchain_ci, null);
+    self.setDebugName(.swapchain_khr, @intFromEnum(win.swapchain), "swapchain");
 
     if (old_swapchain != .null_handle) {
         for (win.views.items) |v| self.device.destroyImageView(v, null);
@@ -1717,27 +1981,39 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     const swap_images = try self.device.getSwapchainImagesAllocKHR(win.swapchain, alloc);
     defer alloc.free(swap_images);
     try win.images.appendSlice(alloc, swap_images);
+    {
+        var name_buf: [64]u8 = undefined;
+        for (win.images.items, 0..) |img, i| {
+            const name = std.fmt.bufPrintZ(&name_buf, "swapchain_img[{}]", .{i}) catch "swapchain_img";
+            self.setDebugName(.image, @intFromEnum(img), name);
+        }
+    }
 
     // Build views atomically: create all into temp list, then swap
     var new_views = std.ArrayList(vk.ImageView).empty;
     errdefer for (new_views.items) |v| self.device.destroyImageView(v, null);
     errdefer new_views.deinit(alloc);
     try new_views.ensureTotalCapacity(alloc, swap_images.len);
-    for (swap_images) |img| {
-        const view = try self.device.createImageView(&.{
-            .image = img,
-            .view_type = .@"2d",
-            .format = win.swapchain_format,
-            .components = .{ .r = .r, .g = .g, .b = .b, .a = .a },
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        }, null);
-        new_views.appendAssumeCapacity(view);
+    {
+        var name_buf: [64]u8 = undefined;
+        for (swap_images, 0..) |img, i| {
+            const view = try self.device.createImageView(&.{
+                .image = img,
+                .view_type = .@"2d",
+                .format = win.swapchain_format,
+                .components = .{ .r = .r, .g = .g, .b = .b, .a = .a },
+                .subresource_range = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            }, null);
+            const vname = std.fmt.bufPrintZ(&name_buf, "swapchain_view[{}]", .{i}) catch "swapchain_view";
+            self.setDebugName(.image_view, @intFromEnum(view), vname);
+            new_views.appendAssumeCapacity(view);
+        }
     }
     // Swap atomically: deinit old, take new
     win.views.deinit(alloc);
@@ -1754,11 +2030,16 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
     try win.cmd_buffers.ensureTotalCapacity(alloc, frames);
     try win.cmd_pool_ready.ensureTotalCapacity(alloc, frames);
 
-    for (0..frames) |_| {
+    for (0..frames) |f| {
         const pool = try self.device.createCommandPool(&.{
             .queue_family_index = self.queue_family_index,
             .flags = .{ .reset_command_buffer_bit = true },
         }, null);
+        {
+            var name_buf: [64]u8 = undefined;
+            const pname = std.fmt.bufPrintZ(&name_buf, "cmd_pool[{}]", .{f}) catch "cmd_pool";
+            self.setDebugName(.command_pool, @intFromEnum(pool), pname);
+        }
         win.cmd_pools.appendAssumeCapacity(pool);
 
         var cb_handle: vk.CommandBuffer = undefined;
@@ -1767,9 +2048,19 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
             .level = .primary,
             .command_buffer_count = 1,
         }, @ptrCast(&cb_handle));
+        {
+            var name_buf: [64]u8 = undefined;
+            const cname = std.fmt.bufPrintZ(&name_buf, "cmd_buf[{}]", .{f}) catch "cmd_buf";
+            self.setDebugName(.command_buffer, @intFromEnum(cb_handle), cname);
+        }
         win.cmd_buffers.appendAssumeCapacity(.{ .handle = cb_handle, .wrapper = &self.vkd });
 
         const fence = try self.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+        {
+            var name_buf: [64]u8 = undefined;
+            const fname = std.fmt.bufPrintZ(&name_buf, "cmd_fence[{}]", .{f}) catch "cmd_fence";
+            self.setDebugName(.fence, @intFromEnum(fence), fname);
+        }
         win.cmd_pool_ready.appendAssumeCapacity(fence);
     }
     log.info("Per-frame resources created: {} frames", .{frames});
@@ -1793,9 +2084,14 @@ fn initPerFrameSemaphoreLists(self: *VkBackend, win: *Window) !void {
 fn createPresentSemaphores(self: *VkBackend, win: *Window) !void {
     const alloc = self.allocator;
     try win.present_sems.ensureTotalCapacity(alloc, win.images.items.len);
-    for (win.images.items) |_| {
-        const sem = try self.device.createSemaphore(&.{}, null);
-        win.present_sems.appendAssumeCapacity(sem);
+    {
+        var name_buf: [64]u8 = undefined;
+        for (win.images.items, 0..) |_, i| {
+            const sem = try self.device.createSemaphore(&.{}, null);
+            const sname = std.fmt.bufPrintZ(&name_buf, "present_sem[{}]", .{i}) catch "present_sem";
+            self.setDebugName(.semaphore, @intFromEnum(sem), sname);
+            win.present_sems.appendAssumeCapacity(sem);
+        }
     }
 }
 fn destroyWindow(self: *VkBackend, win: *Window) void {
@@ -1993,6 +2289,11 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
     };
     const image = try self.device.createImage(&img_info, null);
     errdefer self.device.destroyImage(image, null);
+    {
+        var name_buf: [64]u8 = undefined;
+        const iname = std.fmt.bufPrintZ(&name_buf, "tex_img[{}]", .{self.textures.items.len + 1}) catch "tex_img";
+        self.setDebugName(.image, @intFromEnum(image), iname);
+    }
 
     const owned_memory = storage.vk_buffer == 0;
     const image_memory: vk.DeviceMemory = if (!owned_memory) blk: {
@@ -2086,6 +2387,11 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
     };
     const default_view = try self.device.createImageView(&view_info, null);
     errdefer self.device.destroyImageView(default_view, null);
+    {
+        var name_buf: [64]u8 = undefined;
+        const vname = std.fmt.bufPrintZ(&name_buf, "tex_view[{}]", .{self.textures.items.len + 1}) catch "tex_view";
+        self.setDebugName(.image_view, @intFromEnum(default_view), vname);
+    }
 
     try self.textures.append(self.allocator, .{
         .image = image,
@@ -2295,6 +2601,16 @@ pub fn descHeapCreate(self: *VkBackend, texture_count: u32, texture_rw_count: u3
     }, &sets);
 
     const idx = @as(u32, @intCast(self.desc_heaps.items.len));
+    {
+        var name_buf: [64]u8 = undefined;
+        const pname = std.fmt.bufPrintZ(&name_buf, "desc_pool[{}]", .{idx}) catch "desc_pool";
+        self.setDebugName(.descriptor_pool, @intFromEnum(pool), pname);
+        const set_labels = [_][]const u8{ "tex", "tex_rw", "samp" };
+        for (&sets, set_labels) |*s, label| {
+            const sn = std.fmt.bufPrintZ(&name_buf, "desc_set_{s}[{}]", .{ label, idx }) catch "desc_set";
+            self.setDebugName(.descriptor_set, @intFromEnum(s.*), sn);
+        }
+    }
     try self.desc_heaps.append(self.allocator, .{ .pool = pool, .sets = sets });
     return idx;
 }
@@ -2386,12 +2702,12 @@ pub fn descHeapSetSamplers(self: *VkBackend, heap_idx: u32, start_idx: u32, desc
     self.device.updateDescriptorSets(&.{write}, &.{});
 }
 
-pub fn semaphoreWait(self: *VkBackend, sem: SemaphoreHandle, value: u64) void {
-    _ = self.device.waitSemaphores(&.{
+pub fn semaphoreWait(self: *VkBackend, sem: SemaphoreHandle, value: u64) !void {
+    _ = try self.device.waitSemaphores(&.{
         .semaphore_count = 1,
         .p_semaphores = @ptrCast(&sem),
         .p_values = @ptrCast(&value),
-    }, std.math.maxInt(u64)) catch |err| log.warn("waitSemaphore: waitSemaphores failed: {}", .{err});
+    }, std.math.maxInt(u64));
 }
 
 fn isBlockCompressed(fmt: vk.Format) bool {
@@ -2569,6 +2885,12 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
         .sharing_mode = .exclusive,
     }, null);
     errdefer self.device.destroyBuffer(buf, null);
+    {
+        var name_buf: [64]u8 = undefined;
+        const mem_label = switch (mem_type) { .gpu => "gpu", .default => "host", .readback => "read" };
+        const bname = std.fmt.bufPrintZ(&name_buf, "buf_{s}[{}]", .{ mem_label, self.allocs.items.len }) catch "buf";
+        self.setDebugName(.buffer, @intFromEnum(buf), bname);
+    }
 
     const mem_reqs = self.device.getBufferMemoryRequirements(buf);
     const mem_props: vk.MemoryPropertyFlags = switch (mem_type) {

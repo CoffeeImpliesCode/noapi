@@ -186,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Frame pacing
         if (next_frame > frames_in_flight) {
-            gpu.semaphoreWait(frame_sem, next_frame - frames_in_flight);
+            try gpu.semaphoreWait(frame_sem, next_frame - frames_in_flight);
         }
 
         // Begin frame
@@ -244,7 +244,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Signal semaphore and present
         cmd.addSignalSemaphore(surf.index, frame_sem, next_frame);
-        _ = surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
         next_frame += 1;
 
         // ── FPS output ──────────────────────────────────────
@@ -260,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    gpu.waitIdle();
+    try gpu.waitIdle();
 }
 
 // Convert HSL to RGB (hue: 0-1, saturation: 0-1, lightness: 0-1)

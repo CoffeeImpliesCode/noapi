@@ -51,6 +51,10 @@ pub const Options = struct {
     loader: VkBackend.Options.Loader = .{},
     io: std.Io,
     allocator: std.mem.Allocator = std.heap.page_allocator,
+    enable_debug_utils: bool = false,
+    enable_nv_checkpoints: bool = false,
+    enable_nv_diagnostics: bool = false,
+    enable_device_fault: bool = false,
 };
 
 pub fn init(options: Options) !Gpu {
@@ -64,6 +68,10 @@ pub fn init(options: Options) !Gpu {
             .loader = options.loader,
             .io = options.io,
             .allocator = options.allocator,
+            .enable_debug_utils = options.enable_debug_utils,
+            .enable_nv_checkpoints = options.enable_nv_checkpoints,
+            .enable_nv_diagnostics = options.enable_nv_diagnostics,
+            .enable_device_fault = options.enable_device_fault,
         }),
         .frames_in_flight = options.frames_in_flight,
     };
@@ -72,19 +80,19 @@ pub fn init(options: Options) !Gpu {
 pub fn deinit(self: *Gpu) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.backend.flushPendingFrees();
+    self.backend.flushPendingFrees() catch {};
     self.backend.deinit();
     self.* = undefined;
 }
 
-pub fn flushPendingFrees(self: *Gpu) void {
-    self.backend.flushPendingFrees();
+pub fn flushPendingFrees(self: *Gpu) !void {
+    try self.backend.flushPendingFrees();
 }
 
-pub fn waitIdle(self: *Gpu) void {
+pub fn waitIdle(self: *Gpu) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.backend.waitIdle();
+    try self.backend.waitIdle();
 }
 
 pub fn commandsBegin(self: *Gpu) !CommandBuffer {
@@ -174,19 +182,19 @@ pub fn textureRwViewDescriptor(self: *Gpu, tex: TextureHandle, view_desc: Textur
 pub fn samplerDescriptor(self: *Gpu, desc: SamplerDesc) u64 {
     return self.backend.samplerDescriptor(desc);
 }
-pub fn semaphoreWait(self: *Gpu, sem: Semaphore, value: u64) void {
+pub fn semaphoreWait(self: *Gpu, sem: Semaphore, value: u64) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.backend.semaphoreWait(sem.handle, value);
+    try self.backend.semaphoreWait(sem.handle, value);
 }
 
-pub fn queueSubmit(self: *Gpu, cmd_bufs: []const CommandBuffer) void {
+pub fn queueSubmit(self: *Gpu, cmd_bufs: []const CommandBuffer) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     var handles: [64]vk.CommandBuffer = undefined;
     const count = @min(cmd_bufs.len, handles.len);
     for (cmd_bufs[0..count], 0..) |cb, i| handles[i] = cb.handle;
-    self.backend.queueSubmit(handles[0..count]);
+    try self.backend.queueSubmit(handles[0..count]);
 }
 
 pub fn descHeapCreate(self: *Gpu, texture_count: u32, texture_rw_count: u32, sampler_count: u32) !DescriptorHeap {

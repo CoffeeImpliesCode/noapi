@@ -238,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
     thread1.join();
     thread2.join();
 
-    gpu.waitIdle();
+    try gpu.waitIdle();
 }
 
 const SharedW1 = struct {
@@ -411,7 +411,7 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
         cmd.addWaitSemaphore(win.index, s.test_sem, s.sem_val - 1);
         cmd.addSignalSemaphore(win.index, s.test_sem, s.sem_val);
 
-        _ = win.endFrame(.{ .blit_to_swapchain = true });
+        _ = win.endFrame(.{ .blit_to_swapchain = true }) catch {};
     }
 }
 
@@ -473,7 +473,7 @@ fn window2(win: *noapi.Surface, s: *SharedW2) void {
             }, .linear);
         }
 
-        _ = win.endFrame(.{ .blit_to_swapchain = true });
+        _ = win.endFrame(.{ .blit_to_swapchain = true }) catch {};
     }
 }
 

@@ -142,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Frame pacing
         if (next_frame > frames_in_flight) {
-            gpu.semaphoreWait(frame_sem, next_frame - frames_in_flight);
+            try gpu.semaphoreWait(frame_sem, next_frame - frames_in_flight);
         }
 
         // Begin frame (triggers swapchain recreation if resized)
@@ -155,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
         const new_size = surf.surfaceSize();
         if (new_size.width != surface_size.width or new_size.height != surface_size.height) {
             surface_size = new_size;
-            gpu.waitIdle();
+            try gpu.waitIdle();
             pool.freeTexture(tex_idx);
             pool.freeTextureRw(tex_rw_idx);
             gpu.textureDestroy(output_tex);
@@ -222,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Signal semaphore and present
         cmd.addSignalSemaphore(0, frame_sem, next_frame);
-        _ = surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
         next_frame += 1;
 
         // ── FPS output ──────────────────────────────────────
@@ -240,7 +240,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    gpu.waitIdle();
+    try gpu.waitIdle();
 }
 
 var exts_copy_global: []const [*:0]const u8 = &.{};

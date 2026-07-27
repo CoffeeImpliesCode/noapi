@@ -231,7 +231,7 @@ pub fn main(init: std.process.Init) !void {
         cmd.endRendering();
         cmd.deinitTexHeap();
 
-        _ = surf.endFrame(.{ .blit_to_swapchain = true });
+        _ = try surf.endFrame(.{ .blit_to_swapchain = true });
 
         // ── FPS output ──────────────────────────────────────
         fps_frames += 1;
@@ -246,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    gpu.waitIdle();
+    try gpu.waitIdle();
 }
 
 fn generateCheckerboard(pixels: []u8, grid_size: u32, block_size: u32, color_a: [4]u8, color_b: [4]u8) void {

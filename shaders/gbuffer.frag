@@ -7,7 +7,7 @@
 // Uses descriptor heap for texture sampling.
 
 layout(set = 0, binding = 0) uniform texture2D textureHeap[];
-layout(set = 0, binding = 2) uniform sampler samplerHeap[];
+layout(set = 2, binding = 0) uniform sampler samplerHeap[];
 
 layout(buffer_reference, std430) readonly buffer FragData {
     uint base_color_map;
