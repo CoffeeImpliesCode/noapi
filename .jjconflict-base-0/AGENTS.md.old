@@ -1,0 +1,205 @@
+# NoAPI Graphics API
+
+Zig project presenting a simplified graphics API around Vulkan  + used to  + used bject
+
+## Overview
+
+Vulkan access library + examples in Zig 0.16. Simplified API wrapping Vulkan  + used ly with shader objects (VkShaderEXT), dynamic rendering, descriptor heaps, BDA.
+
+## Sources
+
+- `mr_gpu` (~/projects/codeberg-Games-by-Mason-mr_gpu)
+- `no_gfx_api` (~/Projects/github-leotmp-no_gfx_api) — primary reference for API design
+- `sokol`, `gpui`
+- **Always consult these for design/API questions** — match their semantics unless a documented reason says otherwise. `no_gfx_api` is the primary reference for API design.
+
+## Stack
+
+- **Language**: Zig 0.16, LLVM backend (`use_llvm = true` on all exes)
+- **Vulkan**: 1.4 core, shader objects (`VK_EXT_shader_object`), dynamic rendering, descriptor buffer, BDA, swapchain maintenance1
+- **Windowing**: SDL3
+- **Profiling**: Tracy (optional, `-Denable-tracy=true`)
+- **Shaders**: GLSL → SPIR-V via glslangValidator; loaded at runtime via `Shader.createFromPath`
+- **VCS**: jj — DO NOT USE GIT COMMANDS
+
+## Structure
+
+```
+noapi/             # Library: public API surface
+├── root.zig       # Re-exports all public types
+├── Gpu.zig        # Gpu init/deinit, Options struct, shaderCreate, semaphoreCreate, etc.
+├── Surface.zig    # Window surface, beginFrame/endFrame, SurfaceOptions, PresentMode
+├── CommandBuffer.zig # Command recording (draw, drawIndexed, dispatch, barriers, etc.)
+├── VkBackend.zig  # Vulkan backend implementation (~2500 lines)
+├── Shader.zig     # Shader struct + create/createFromPath/destroy
+├── ShaderHandle.zig, TextureHandle.zig  # Handle types
+├── Texture.zig    # Texture descriptors, upload, blit
+├── Buffer.zig     # (mostly dead code — use GpuPtr+gpuMalloc instead)
+├── DescriptorPool.zig, DescriptorHeap.zig  # Bindless descriptor management
+├── Rendering.zig  # Dynamic rendering attachment state + LoadOp/StoreOp enums
+├── RasterState.zig, DepthState.zig, BlendState.zig  # GPU state enums
+├── GpuArena.zig   # Arena allocator for GPU memory (needs Gpu ref fix)
+├── GpuPtr.zig     # GPU memory pointer with cpu/gpu address
+├── Semaphore.zig, Queue.zig, Barrier.zig  # Sync primitives
+├── vk.zig         # Generated Vulkan bindings (~58,800 lines)
+examples/          # 7 example applications
+├── 1_triangle/    # Minimal triangle
+├── 2_textures/    # Texture 2D
+├── 3_3D/          # 3D cube with camera
+├── 4_textures_advanced/ # 3D volume cloud raymarching
+├── 5_indirect_triangles/ # Indirect draw
+├── 6_compute_shaders/    # Compute+t graphics
+├── 7_deferred_async_load/ # Deferred rendering
+test/              # Unit tests
+shaders/           # Pre-compiled SPIR-V (.spv) + GLSL sources
+```
+
+## Where to Look
+
+| Task | Location |
+| ------ | ---------- |
+| Add GPU state enum | `noapi/RasterState.zig`, `DepthState.zig`, `BlendState.zig` |
+| Add backend command | `noapi/VkBackend.zig` (function) + `noapi/CommandBuffer.zig` (public wrapper) |
+| Modify swapchain/present | `noapi/VkBackend.zig` `addWindow`, `recreateSwapchain`, `beginFrame`/`endFrame` |
+| Add example | `examples/N_name/main.zig` + `build.zig` |
+| Change build options | `build.zig` — frames_in_flight, use_llvm, tracy |
+| Fix example shader | `shaders/*.glsl` → compile via glslangValidator |
+
+## Conventions
+
+- Tiger-style: explicit allocators, no hidden allocations, defer everything
+- API/Backend separation: public API never touches Vulkan directly
+- Column-major matrices (GL/Vulkan convention)
+- `SurfaceOptions`/`Gpu.Options` pattern for init configs
+- `pub const` required for tracy_impl/tracy_options for `@hasDecl(root, ...)` dispatch
+- LoadOp/StoreOp enums map exactly to Vulkan values (load=0, clear=1, dont_care=2)
+- PresentMode: fifo (default), mailbox, immediate, fifo_relaxed
+
+## Development
+
+- Use tools, always use `edit` instead of rewriting the file
+- Using shell for large edits is unadvised
+- **MANDATORY — tools over shell**: file changes go through `edit`/`write` only. NEVER patch files with inline python/perl/sed/awk scripts, heredocs, or `echo >` redirection — this corrupts files and bypasses review. Read with `read`, search with `grep`/`glob`. Shell is for builds/tests and one-shot fact queries only. If an `edit` fails, read and retry with exact text — never fall back to scripting.
+- Delegate, Delegate, Delegate
+- Be as parallel as possible: 20 files to edit -> 20 workers, 8 files touched → 8 workers, 3 research topics → 3 librarians, 5 hard problems → 5 oracles
+- Break tasks down, assume subagents are dumb, give full instruction, use many subagents with small tasks each
+- Appending task sessions (task_id) preserves full context — always prefer resume over restart
+
+## Anti-patterns (Modern Vulkan)
+
+### Currently enforced in code
+
+- **No direct git commands** — use jj only
+- **No VkPipeline** — use `VkShaderEXT` (shader objects) + dynamic state via `vkCmdSet*EXT`
+- **No render passes / VkFramebuffer** — use dynamic rendering (`vkCmdBeginRendering`)
+- **No VkShaderModule** — `VK_EXT_shader_object` replaces it. SPIR-V goes directly to `VkShaderEXT`
+- **No descriptor sets per-object** — bindless descriptor indexing with arrays of 65536 slots
+- **No per-draw descriptor binding** — push constants pass indices into the bindless heap
+- **No vertex buffers / vertex input** — BDA vertex pulling in shaders (desktop)
+- **No staging buffers for upload** — use BDA + persistent mapping (Resizable BAR / UMA)
+- **No `usingnamespace`** — removed in Zig 0.16
+
+### Not yet applied (future improvements)
+
+- **No vkQueueSubmit** — should migrate to `vkQueueSubmit2` (sync2) for simpler pipeline barriers
+- **No explicit attachment layout transitions** — `VK_KHR_unified_image_layouts` allows using `GENERAL` for everything, removing all attachment barriers
+- **No VkDescriptorPool** — `VK_EXT_descriptor_heap` replaces descriptor sets/layouts/pools entirely (requires very recent drivers)
+- **No VkPipelineLayout for graphics** — `vkCmdPushDataEXT` can replace push constants, eliminating the need for a pipeline layout on the graphics path
+
+## Remaining Issues
+
+1. Buffer struct + methods are dead code — `bufferCreate`/`bufferDestroy` exist on Gpu but nothing calls them; `drawTriangles` does its own `gpuMalloc` directly
+2. Gpu.zig has `pub const` handle types (CommandBufferHandle, ShaderHandle, etc.) that duplicate concepts in root.zig; `ShaderHandle.zig` in particular is dead code — its `struct { id: u32, stage: ShaderStage }` is never used, the active type is `VkBackend.ShaderHandle = vk.ShaderEXT`
+3. `drawTriangles` in Gpu.zig allocates vertex/index buffer via `gpuMalloc` but never frees it (per-frame leak)
+4. `noapi/VkBackend.zig.bak` — stale backup file in the source tree
+
+### Resolved
+
+- ~~GpuArena.create() needs *Gpu reference~~ — now a pure bump allocator over GpuPtr, no Gpu needed
+- ~~DescriptorPool alloc* always returns 0~~ — properly bumps counters and uses freelists
+- ~~gpuHostToDevicePointer is a stub~~ — iterates allocs to compute GPU address
+
+## Commands
+
+```bash
+zig build          # Build all examples
+zig build test     # Run tests
+zig build 1_triangle  # Build specific example
+zig build -Denable-tracy=true  # Build with Tracy profiling
+glslangValidator -V shaders/file.vert -o shaders/file_vert.spv  # Compile shader
+```
+
+## Validation
+
+- `zig build check` for quick errors
+- `zig build` full validation
+- Use locally built analyzers (`~/tools/ziglint`, `~/tools/zbc`, `~/tools/zcov`, `~/tools/zlint`) — they may be patched for this setup; prefer over nixpkgs versions.
+- `ziglint` compliance after every implementation change (Bugs and Style issues, minus `unsafe undefined`)
+- Check Vulkan validation errors: `timeout 3 ./zig-out/bin/N_example 2>&1 | strings | grep -i "VAL.ERROR" | wc -l`
+- All examples must produce 0 validation errors
+
+
+## Hardcore quality bar (2026-08)
+
+Applies Tiger Style (loose) + aggressive linting/coverage/verification +
+mandatory post-implementation review. Read before coding:
+`zig-tiger-style`, `zig-best-practices`, `zig-project`, `zig-linting`,
+`zig-coverage`, `zig-testing`, `verification-before-completion`,
+`code-review`, `jj-core`, `using-git-worktrees`.
+
+- **ziglint is the project linter** (already enforced: Bugs + Style
+  minus unsafe-undefined) — keep it.
+- `vk.zig` and other generated files are excluded from lint/coverage.
+- The Vulkan validation check (`VAL.ERROR` count) stays part of gate 2
+  for example binaries.
+
+### Gates — definition of done (evidence in the same turn)
+- **`gate`** (devenv shell; runs `zig-gate`): run all quality gates in one command — fmt --check, build, test, ast-check, ziglint, zlint (local ~/.local/bin tools); zbc by default (advisory; strict via ZBC_STRICT=1); optional `--cov`; exits 1 on issues.
+1. `zig fmt --check .` — zero diffs.
+2. `zig build` Debug + ReleaseSafe — exit 0.
+3. `zig build test` Debug + ReleaseSafe — all green, zero leaks (`std.testing.allocator`).
+4. `zig ast-check` on every changed `.zig`.
+5. `test { std.testing.refAllDecls(@This()); }` in each root — unused decls still type-check.
+6. Linter — zero errors on changed files.
+7. Coverage (kcov 0.16): every uncovered path is test / refactor / accept-with-written-reason.
+8. Optional: `-fsanitize-c=full`, `-fsanitize-thread`, valgrind (`-fvalgrind`).
+9. Parser/decoder changes: `zig build test --fuzz=<bounded>` — no crashes, inputs replayed.
+
+Density rule: 12/357 covered paths is noise; 352/357 makes each missing
+path a judgment call. Coverage guides, never gates alone.
+
+### Reviewer workflow (mandatory after every implementation)
+1. Run the gates; attach raw output (exit codes, counts) — no summaries.
+2. Standards: tiger rules + Fowler smells (mysterious names, duplication,
+   feature envy, primitive obsession, repeated switches, shotgun surgery,
+   speculative generality, message chains, middle man, refused bequest).
+   Repo rules override; smells are judgment calls.
+3. Spec: re-read the task — missing requirements, scope creep, wrong
+   implementations; quote the spec line per finding.
+4. Spawn a reviewer subagent for non-trivial diffs; it re-runs gates
+   1–3, 6–7 and both axes independently.
+5. Fix at root cause; re-run failed gates.
+6. Report shape:
+   `GATES: fmt=… test=… leaks=… lint=… coverage=… | REVIEW: Standards N | Spec N | FIXED: … | SKIPPED (reason): … | DEBT: (ceiling + trigger)`
+   3 failed fix attempts on one file → stop, escalate.
+
+### Clean environment (jj)
+- New work starts on a clean change. Dirty? `jj commit -m "wip: ..."`
+  (checkpoint) or a fresh change — jj snapshots the working copy, so a
+  dirty tree mixes new work with WIP and restore/abandon sweeps both.
+- Parallel/risky work: `jj worktree add <path>`; detect existing
+  isolation first, never nest. Editing subagents get their own isolated
+  worktree/change.
+- Baseline tests must pass before the first edit — a red suite is
+  provably yours.
+
+### AI-slop guard
+- Obvious comments → remove; KEEP why-comments. Over-defensive checks →
+  prove redundancy (keep boundary validation). Nesting >3 / god fns
+  (>50 lines) / long param lists → restructure. Needless abstraction →
+  delete. Dead code (unused decls, `std.debug.print` in non-test) →
+  remove. Duplication → extract only shared intent. Missing tests → add
+  the narrowest regression test, never remove code. >250 pure LOC
+  modules → split by responsibility (never `utils.zig`). Performance
+  equivalences → only when provably equivalent; unsure → SKIP. Silent
+  skips forbidden; report `N/A` explicitly.
