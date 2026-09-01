@@ -626,7 +626,6 @@ fn createSolidColorTexture(gpu: *noapi.Gpu, rgba: *const [4]u8) !noapi.Texture {
     cmd.copyToTexture(tex, staging, .{ .size = .{ 1, 1, 1 } });
     cmd.barrier(.{ .transfer = true }, .{ .fragment = true }, .{});
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
 
     return tex;
 }
@@ -717,7 +716,6 @@ fn loadEnvMap(gpa: std.mem.Allocator, io: Io, gpu: *noapi.Gpu, pool: *Descriptor
     cmd.copyToTexture(tex, staging, .{ .size = .{ width, height, 1 } });
     cmd.barrier(.{ .transfer = true }, .{ .fragment = true }, .{});
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
 
     // Allocate in descriptor heap
     const idx = pool.allocTexture(tex.handle, samp_handle, .@"2d");

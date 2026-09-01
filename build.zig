@@ -13,8 +13,8 @@ pub fn build(b: *std.Build) void {
     // zig-cov coverage (see zig-cov README): zig-gate --cov passes these
     const coverage = b.option(bool, "coverage", "Enable zig-cov") orelse false;
     const cov_rt = b.option([]const u8, "coverage-rt", "zig-cov-rt path") orelse null;
-
-    // ── noapi module ───────────────────────────────
+    // Focused unit verification: `zig build test -Dtest-filter=<name>`.
+    const test_filter = b.option([]const u8, "test-filter", "Only run tests matching this substring") orelse null;
     const mod = b.addModule("noapi", .{
         .root_source_file = b.path("noapi/root.zig"),
         .target = target,
@@ -69,6 +69,29 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
+
+    const submission_lifecycle_step = b.step(
+        "submission-lifecycle",
+        "Run the real offscreen submission lifecycle check",
+    );
+    const submission_lifecycle_cmd = b.addRunArtifact(exe);
+    submission_lifecycle_cmd.addArgs(&.{ "--submission-lifecycle-test", "8" });
+    submission_lifecycle_step.dependOn(&submission_lifecycle_cmd.step);
+    const presentation_feedback_mode = b.option(
+        []const u8,
+        "presentation-mode",
+        "Presentation timing backend: selected or google",
+    ) orelse "selected";
+    const presentation_feedback_step = b.step(
+        "presentation-feedback",
+        "Run the real compositor presentation feedback check",
+    );
+    const presentation_feedback_cmd = b.addRunArtifact(exe);
+    presentation_feedback_cmd.addArgs(&.{
+        "--presentation-feedback-test",
+        presentation_feedback_mode,
+    });
+    presentation_feedback_step.dependOn(&presentation_feedback_cmd.step);
 
     // ── 1_triangle example executable ─────────────────────
     const exe_1_triangle = b.addExecutable(.{
@@ -252,7 +275,6 @@ pub fn build(b: *std.Build) void {
     exe_7.root_module.linkLibrary(lib);
 
     b.installArtifact(exe_7);
-
     const run_7_step = b.step("7_deferred_async_load", "Run 7_deferred_async_load example");
     const run_7_cmd = b.addRunArtifact(exe_7);
     run_7_step.dependOn(&run_7_cmd.step);
@@ -268,7 +290,7 @@ pub fn build(b: *std.Build) void {
         if (cov_rt) |p| mod_tests.root_module.addObjectFile(.{ .cwd_relative = p });
     }
     const run_mod_tests = b.addRunArtifact(mod_tests);
-
+    if (test_filter) |filter| mod_tests.filters = &.{filter};
     const test_step = b.step("test", "Run noapi tests");
     test_step.dependOn(&run_mod_tests.step);
     const install_docs = b.addInstallDirectory(.{

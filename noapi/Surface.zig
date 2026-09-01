@@ -15,6 +15,7 @@ const CommandBuffer = @import("CommandBuffer.zig");
 const FrameSchedule = @import("Gpu.zig").FrameSchedule;
 const FrameResult = @import("Gpu.zig").FrameResult;
 const PresentInfo = @import("Gpu.zig").PresentInfo;
+const PresentFeedback = @import("Gpu.zig").PresentFeedback;
 
 pub const PresentMode = enum(u32) {
     fifo = 0,
@@ -90,6 +91,19 @@ pub fn notifyResize(self: *Surface, extent: Extent2D) void {
 pub fn slopNs(self: *Surface) u64 {
     if (self.index >= self.gpu.backend.windows.items.len) return 0;
     return self.gpu.backend.windows.items[self.index].slop_ns;
+}
+
+/// True when the presentation engine reports actual presentation timestamps
+/// through VK_EXT_present_timing or VK_GOOGLE_display_timing.
+pub fn supportsPresentTiming(self: *const Surface) bool {
+    return self.gpu.backend.presentTimingSupported(self.index);
+}
+
+/// Poll completed presentation feedback into caller storage. Never allocates
+/// and never drops records: OutputTooSmall is returned before consuming any
+/// driver record when the storage cannot hold all completed feedback.
+pub fn pollPresentFeedback(self: *Surface, out: []PresentFeedback) !usize {
+    return self.gpu.backend.pollPresentFeedback(self.index, out);
 }
 
 test {

@@ -1,6 +1,7 @@
 //! Command buffer — GPU command recording.
 const std = @import("std");
 const Gpu = @import("Gpu.zig");
+const TimestampQuerySet = @import("TimestampQuerySet.zig");
 const SamplerDesc = @import("Texture.zig").SamplerDesc;
 const tracy = @import("tracy");
 const CommandBuffer = @This();
@@ -47,11 +48,29 @@ pub const DispatchIndirectCommand = extern struct {
     num_groups_y: u32,
     num_groups_z: u32,
 };
-
 pub fn barrier(self: *CommandBuffer, before: Stage, after: Stage, hazards: Hazard) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     self.gpu.backend.cmdBarrier(self.handle, before, after, hazards);
+}
+pub fn timestampReset(
+    self: *CommandBuffer,
+    set: TimestampQuerySet.TimestampQuerySet,
+    first: u32,
+    count: u32,
+) !void {
+    try TimestampQuerySet.validateQueryRange(set.count, first, count);
+    try self.gpu.backend.cmdTimestampReset(self.handle, set.handle, first, count);
+}
+
+pub fn timestampWrite(
+    self: *CommandBuffer,
+    set: TimestampQuerySet.TimestampQuerySet,
+    index: u32,
+    stage: TimestampQuerySet.TimestampStage,
+) !void {
+    if (index >= set.count) return error.InvalidTimestampRange;
+    try self.gpu.backend.cmdTimestampWrite(self.handle, set.handle, index, stage);
 }
 
 /// Begin a Tracy GPU zone — recorded as a Vulkan timestamp query pair into
