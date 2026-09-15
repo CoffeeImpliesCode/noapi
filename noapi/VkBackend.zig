@@ -2099,6 +2099,7 @@ pub fn queryLastCheckpoint(self: *VkBackend) u32 {
     if (data_count > 0) {
         const count: usize = @min(data_count, 64);
         if (count == 0) return 0;
+        var data: [64]vk.CheckpointDataNV = undefined;
         for (&data) |*d| {
             d.* = .{
                 .s_type = .checkpoint_data_nv,
@@ -2107,7 +2108,7 @@ pub fn queryLastCheckpoint(self: *VkBackend) u32 {
                 .p_checkpoint_marker = @ptrCast(&d.stage),
             };
         }
-        var query_count: u32 = count;
+        var query_count: u32 = @intCast(count);
         self.device.getQueueCheckpointDataNV(self.queue.handle, &query_count, &data);
         log.warn("  stage        pipeline                         marker", .{});
         log.warn("  ------------  ------------------------------  --------", .{});
