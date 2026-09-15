@@ -118,12 +118,12 @@ pub const App = struct {
         try sdl3.init(.{ .video = true, .events = true });
         errdefer sdl3.quit(.{ .video = true, .events = true });
 
-        const win = try sdl3.video.Window.init(app_name, width, height, .{
+        var win: ?sdl3.video.Window = try sdl3.video.Window.init(app_name, width, height, .{
             .resizable = true,
             .high_pixel_density = true,
         });
-        errdefer win.deinit();
-        try win.show();
+        errdefer if (win) |w| w.deinit();
+        try win.?.show();
 
         // Vulkan loader via SDL3
         try sdl3.vulkan.loadLibrary(null);
@@ -156,7 +156,7 @@ pub const App = struct {
 
         // Surface — pass gpu directly (already a stable heap pointer)
         const sdl_surface = try sdl3.vulkan.Surface.init(
-            win,
+            win.?,
             @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
             null,
         );
@@ -165,10 +165,13 @@ pub const App = struct {
             .extent = .{ .width = width, .height = height },
         });
 
+        // Success: App.deinit owns win from here; disarm the errdefer.
+        const owned_win = win.?;
+        win = null;
         return .{
             .gpu = gpu,
             .surf = surf,
-            .sdl_win = win,
+            .sdl_win = owned_win,
             .gpa = allocator,
             .io = io,
             .width = width,
