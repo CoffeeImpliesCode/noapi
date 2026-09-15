@@ -157,7 +157,6 @@ pub fn main(init: std.process.Init) !void {
             if (e == error.OutOfDateKHR) continue;
             @panic("beginFrame");
         };
-        _ = schedule;
 
         const surface_size = app.surf.surfaceSize();
         if (surface_size.width == 0 or surface_size.height == 0) {
@@ -216,6 +215,7 @@ pub fn main(init: std.process.Init) !void {
         _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
 
         timer.report();
+        if (schedule.next_vblank_us > 1000) try std.Io.sleep(io, .fromMicroseconds(schedule.next_vblank_us - 1000), .awake);
     }
 
     try app.gpu.waitIdle();
