@@ -2097,8 +2097,8 @@ pub fn queryLastCheckpoint(self: *VkBackend) u32 {
     self.device.getQueueCheckpointDataNV(self.queue.handle, &data_count, null);
     log.warn("═══ NVIDIA GPU CHECKPOINTS ═══", .{});
     if (data_count > 0) {
-        const count = @min(data_count, 64);
-        var data: [64]vk.CheckpointDataNV = undefined;
+        const count: usize = @min(data_count, 64);
+        if (count == 0) return 0;
         for (&data) |*d| {
             d.* = .{
                 .s_type = .checkpoint_data_nv,
