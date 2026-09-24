@@ -31,6 +31,26 @@ pub fn submitSignal(self: *Queue, cmd_bufs: []const CommandBuffer, sem: Semaphor
     try self.gpu.backend.queueSubmitSignal(copied_handles, sem.handle, value);
 }
 
+pub fn submitWaitSignal(
+    self: *Queue,
+    cmd_bufs: []const CommandBuffer,
+    wait_sem: Semaphore,
+    wait_value: u64,
+    signal_sem: Semaphore,
+    signal_value: u64,
+) !void {
+    if (cmd_bufs.len == 0) return;
+    var handles: [64]Gpu.CommandBufferHandle = undefined;
+    const copied_handles = try copyCommandBufferHandles(cmd_bufs, &handles);
+    try self.gpu.backend.queueSubmitWaitSignal(
+        copied_handles,
+        wait_sem.handle,
+        wait_value,
+        signal_sem.handle,
+        signal_value,
+    );
+}
+
 pub fn waitIdle(self: *Queue) !void {
     try self.gpu.backend.queueWaitIdle();
 }

@@ -48,6 +48,7 @@ pub const DispatchIndirectCommand = extern struct {
     num_groups_y: u32,
     num_groups_z: u32,
 };
+
 pub fn barrier(self: *CommandBuffer, before: Stage, after: Stage, hazards: Hazard) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();

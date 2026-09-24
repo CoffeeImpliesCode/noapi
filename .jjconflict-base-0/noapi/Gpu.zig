@@ -10,6 +10,7 @@ const Shader = @import("Shader.zig");
 const Semaphore = @import("Semaphore.zig");
 const Buffer = @import("Buffer.zig");
 const CommandBuffer = @import("CommandBuffer.zig");
+const TimestampQuerySet = @import("TimestampQuerySet.zig");
 const Texture = @import("Texture.zig");
 const DescriptorHeap = @import("DescriptorHeap.zig");
 
@@ -37,6 +38,12 @@ pub const ShaderHandle = VkBackend.ShaderHandle;
 pub const SemaphoreHandle = VkBackend.SemaphoreHandle;
 pub const BufferHandle = VkBackend.BufferHandle;
 pub const QueueHandle = VkBackend.QueueHandle;
+pub const TimestampQueryHandle = VkBackend.TimestampQueryHandle;
+pub const DeviceIdentity = VkBackend.DeviceIdentity;
+
+pub fn deviceIdentity(self: *const Gpu) DeviceIdentity {
+    return self.backend.deviceIdentity();
+}
 
 backend: *VkBackend,
 frames_in_flight: u5,
@@ -103,15 +110,43 @@ pub fn commandsBegin(self: *Gpu) !CommandBuffer {
     return .{ .gpu = self, .handle = handle };
 }
 
-pub fn commandsEnd(self: *Gpu, cmd: CommandBuffer) void {
-    self.backend.commandsEnd(cmd.handle);
-}
-
 pub fn numSurfaces(self: *const Gpu) u32 {
     return self.backend.numWindows();
 }
 pub fn deviceLimits(self: *const Gpu) DeviceLimits {
     return self.backend.deviceLimits();
+}
+pub fn timestampInfo(self: *const Gpu) ?TimestampQuerySet.TimestampInfo {
+    return self.backend.timestampInfo();
+}
+
+pub fn timestampQuerySetCreate(self: *Gpu, count: u32) !TimestampQuerySet.TimestampQuerySet {
+    const handle = try self.backend.timestampQuerySetCreate(count);
+    return .{ .gpu = self, .handle = handle, .count = count };
+}
+
+pub fn timestampQuerySetDestroy(self: *Gpu, set: TimestampQuerySet.TimestampQuerySet) void {
+    self.backend.timestampQuerySetDestroy(set.handle);
+}
+
+pub fn timestampQuerySetRead(
+    self: *Gpu,
+    set: TimestampQuerySet.TimestampQuerySet,
+    first: u32,
+    out: []u64,
+) !void {
+    if (out.len > std.math.maxInt(u32)) return error.InvalidTimestampRange;
+    try TimestampQuerySet.validateQueryRange(set.count, first, @intCast(out.len));
+    try self.backend.timestampQuerySetRead(set.handle, first, out);
+}
+
+fn copyCommandBufferHandles(
+    cmd_bufs: []const CommandBuffer,
+    handles: *[64]CommandBufferHandle,
+) ![]CommandBufferHandle {
+    if (cmd_bufs.len > handles.len) return error.TooManyCommandBuffers;
+    for (cmd_bufs, 0..) |cb, i| handles[i] = cb.handle;
+    return handles[0..cmd_bufs.len];
 }
 
 // ── Handle types (opaque, mr_gpu style) ─────────────────────
@@ -194,10 +229,30 @@ pub fn semaphoreWait(self: *Gpu, sem: Semaphore, value: u64) !void {
 pub fn queueSubmit(self: *Gpu, cmd_bufs: []const CommandBuffer) !void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    var handles: [64]vk.CommandBuffer = undefined;
-    const count = @min(cmd_bufs.len, handles.len);
-    for (cmd_bufs[0..count], 0..) |cb, i| handles[i] = cb.handle;
-    try self.backend.queueSubmit(handles[0..count]);
+    var handles: [64]CommandBufferHandle = undefined;
+    const copied_handles = try copyCommandBufferHandles(cmd_bufs, &handles);
+    try self.backend.queueSubmit(copied_handles);
+}
+
+pub fn queueSubmitWaitSignal(
+    self: *Gpu,
+    cmd_bufs: []const CommandBuffer,
+    wait_sem: Semaphore,
+    wait_value: u64,
+    signal_sem: Semaphore,
+    signal_value: u64,
+) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+    var handles: [64]CommandBufferHandle = undefined;
+    const copied_handles = try copyCommandBufferHandles(cmd_bufs, &handles);
+    try self.backend.queueSubmitWaitSignal(
+        copied_handles,
+        wait_sem.handle,
+        wait_value,
+        signal_sem.handle,
+        signal_value,
+    );
 }
 
 pub fn descHeapCreate(self: *Gpu, texture_count: u32, texture_rw_count: u32, sampler_count: u32) !DescriptorHeap {
@@ -242,8 +297,43 @@ pub fn instanceHandle(self: *const Gpu) vk.Instance {
 // Basic types
 
 pub const FrameSchedule = struct { next_vblank_us: u32, swapchain_recreated: bool };
-pub const FrameResult = struct { gpu_blocked_ns: u64 };
-pub const PresentInfo = struct { blit_to_swapchain: bool = true };
+pub const FrameResult = struct {
+    gpu_blocked_ns: u64,
+    present_out_of_date: bool = false,
+};
+pub const PresentInfo = struct {
+    blit_to_swapchain: bool = true,
+    timing_id: ?u64 = null,
+};
+pub const PresentFeedback = struct {
+    present_id: u64,
+    actual_present_ns: u64,
+};
+
+test "task4 FrameResult defaults to a normal present" {
+    const result: FrameResult = .{ .gpu_blocked_ns = 0 };
+    try std.testing.expect(!result.present_out_of_date);
+}
+
+test "task4 submission wrapper accepts 64 and rejects 65 command buffers" {
+    var command_buffers: [65]CommandBuffer = undefined;
+    for (&command_buffers, 0..) |*command_buffer, index| {
+        command_buffer.* = .{
+            .gpu = undefined,
+            .handle = @enumFromInt(@as(u64, @intCast(index + 1))),
+        };
+    }
+
+    var handles: [64]CommandBufferHandle = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 64),
+        (try copyCommandBufferHandles(command_buffers[0..64], &handles)).len,
+    );
+    try std.testing.expectError(
+        error.TooManyCommandBuffers,
+        copyCommandBufferHandles(command_buffers[0..65], &handles),
+    );
+}
 
 test {
     std.testing.refAllDecls(@This());

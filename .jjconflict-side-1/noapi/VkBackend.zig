@@ -287,6 +287,43 @@ fn presentTimingWatchdogDecision(
     if (outstanding == 0 or now_ns < start_ns) return .wait;
     return if (now_ns - start_ns >= present_timing_deadline_ns) .disable else .wait;
 }
+fn presentTimingWatchdogProgressStart(
+    outstanding: u32,
+    current_start_ns: ?i96,
+    now_ns: i96,
+    completed: usize,
+) ?i96 {
+    if (completed == 0) return current_start_ns;
+    return if (outstanding == 0) null else now_ns;
+}
+
+fn notePresentTimingProgress(self: *VkBackend, win: *Window, completed: usize) void {
+    if (completed == 0) {
+        if (win.outstanding_timed_presents == 0) {
+            win.first_timed_present_start_ns = null;
+            win.present_timing_diagnostics.first_timed_present_start_ns = 0;
+        }
+        return;
+    }
+    const now_ns = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+    const current_start_ns = if (win.first_timed_present_start_ns) |start|
+        start.nanoseconds
+    else
+        null;
+    const next_start_ns = presentTimingWatchdogProgressStart(
+        win.outstanding_timed_presents,
+        current_start_ns,
+        now_ns,
+        completed,
+    );
+    if (next_start_ns) |start_ns| {
+        win.first_timed_present_start_ns = std.Io.Timestamp.fromNanoseconds(start_ns);
+        win.present_timing_diagnostics.first_timed_present_start_ns = start_ns;
+    } else {
+        win.first_timed_present_start_ns = null;
+        win.present_timing_diagnostics.first_timed_present_start_ns = 0;
+    }
+}
 
 const PresentationScratch = struct {
     records: [max_present_feedback]PresentRecord = undefined,
@@ -356,8 +393,20 @@ pub const BufferHandle = vk.Buffer;
 pub const QueueHandle = vk.Queue;
 pub const TextureHandle = @import("TextureHandle.zig");
 
+pub const DeviceIdentity = struct {
+    name: []const u8,
+    vendor_id: u32,
+    device_id: u32,
+    driver: []const u8,
+};
+
 pub const max_textures = 65536;
 pub const max_samplers = 256;
+
+fn propertyString(bytes: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
+    return bytes[0..end];
+}
 
 allocator: Allocator = undefined,
 b: vk.BaseWrapper = undefined,
@@ -402,6 +451,12 @@ texture_view_cache: std.AutoHashMap(u64, vk.ImageView) = undefined,
 sampler_cache: std.AutoHashMap(u64, vk.Sampler) = undefined,
 // Device limits queried at init from VkPhysicalDeviceProperties
 device_limits: DeviceLimits = .{},
+selected_device_name: [vk.MAX_PHYSICAL_DEVICE_NAME_SIZE]u8 = undefined,
+selected_device_name_len: u32 = 0,
+selected_driver_name: [vk.MAX_DRIVER_NAME_SIZE]u8 = undefined,
+selected_driver_name_len: u32 = 0,
+selected_vendor_id: u32 = 0,
+selected_device_id: u32 = 0,
 // Memory properties cached at init from vkGetPhysicalDeviceMemoryProperties
 mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
 
@@ -891,6 +946,30 @@ pub fn init(options: Options) !*VkBackend {
 
     const gpu_props = self.instance.getPhysicalDeviceProperties(self.physical_device);
     log.info("GPU: {s}", .{@as([]const u8, &gpu_props.device_name)});
+
+    var driver_props: vk.PhysicalDeviceDriverProperties = .{
+        .driver_id = @enumFromInt(0),
+        .driver_name = .{0} ** vk.MAX_DRIVER_NAME_SIZE,
+        .driver_info = .{0} ** vk.MAX_DRIVER_INFO_SIZE,
+        .conformance_version = .{ .major = 0, .minor = 0, .subminor = 0, .patch = 0 },
+    };
+    var selected_properties: vk.PhysicalDeviceProperties2 = .{
+        .p_next = @ptrCast(&driver_props),
+        .properties = gpu_props,
+    };
+    self.instance.getPhysicalDeviceProperties2(self.physical_device, &selected_properties);
+    const selected_name = propertyString(&gpu_props.device_name);
+    const driver_name = propertyString(&driver_props.driver_name);
+    const driver_info = propertyString(&driver_props.driver_info);
+    const selected_driver = if (driver_info.len != 0) driver_info else driver_name;
+    if (selected_name.len > self.selected_device_name.len) return error.BackendError;
+    if (selected_driver.len > self.selected_driver_name.len) return error.BackendError;
+    @memcpy(self.selected_device_name[0..selected_name.len], selected_name);
+    @memcpy(self.selected_driver_name[0..selected_driver.len], selected_driver);
+    self.selected_device_name_len = @intCast(selected_name.len);
+    self.selected_driver_name_len = @intCast(selected_driver.len);
+    self.selected_vendor_id = gpu_props.vendor_id;
+    self.selected_device_id = gpu_props.device_id;
 
     // Query device limits from Vulkan.
     {
@@ -1811,6 +1890,11 @@ pub fn waitIdle(self: *VkBackend) !void {
     self.reclaimSubmittedWork();
 }
 
+const TimelineWait = struct {
+    semaphore: SemaphoreHandle,
+    value: u64,
+};
+
 const TimelineSignal = struct {
     semaphore: SemaphoreHandle,
     value: u64,
@@ -1819,9 +1903,19 @@ const TimelineSignal = struct {
 fn queueSubmitTracked(
     self: *VkBackend,
     handles: []const CommandBufferHandle,
+    wait: ?TimelineWait,
     signal: ?TimelineSignal,
 ) !void {
     if (handles.len == 0) return;
+    if (wait) |wait_timeline| {
+        if (signal) |signal_timeline| {
+            if (wait_timeline.semaphore == signal_timeline.semaphore and
+                wait_timeline.value >= signal_timeline.value)
+            {
+                return error.InvalidTimelineOrder;
+            }
+        }
+    }
 
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
@@ -1852,20 +1946,33 @@ fn queueSubmitTracked(
     for (handles) |h| try self.device.endCommandBuffer(h);
 
     var timeline_info: vk.TimelineSemaphoreSubmitInfo = .{};
+    var wait_semaphores: [1]vk.Semaphore = undefined;
+    var wait_values: [1]u64 = undefined;
+    var wait_stage_masks: [1]vk.PipelineStageFlags = undefined;
     var signal_semaphores: [1]vk.Semaphore = undefined;
     var signal_values: [1]u64 = undefined;
+    if (wait) |timeline| {
+        wait_semaphores[0] = timeline.semaphore;
+        wait_values[0] = timeline.value;
+        wait_stage_masks[0] = .{ .all_commands_bit = true };
+    }
     if (signal) |timeline| {
         signal_semaphores[0] = timeline.semaphore;
         signal_values[0] = timeline.value;
-        timeline_info = .{
-            .signal_semaphore_value_count = 1,
-            .p_signal_semaphore_values = &signal_values,
-        };
     }
+    timeline_info = .{
+        .wait_semaphore_value_count = if (wait != null) 1 else 0,
+        .p_wait_semaphore_values = if (wait != null) @ptrCast(&wait_values) else null,
+        .signal_semaphore_value_count = if (signal != null) 1 else 0,
+        .p_signal_semaphore_values = if (signal != null) @ptrCast(&signal_values) else null,
+    };
     const submit_info: vk.SubmitInfo = .{
-        .p_next = if (signal != null) @ptrCast(&timeline_info) else null,
+        .p_next = if (wait != null or signal != null) @ptrCast(&timeline_info) else null,
         .command_buffer_count = @intCast(handles.len),
         .p_command_buffers = handles.ptr,
+        .wait_semaphore_count = if (wait != null) 1 else 0,
+        .p_wait_semaphores = if (wait != null) @ptrCast(&wait_semaphores) else null,
+        .p_wait_dst_stage_mask = if (wait != null) @ptrCast(&wait_stage_masks) else null,
         .signal_semaphore_count = if (signal != null) 1 else 0,
         .p_signal_semaphores = if (signal != null) @ptrCast(&signal_semaphores) else null,
     };
@@ -1881,7 +1988,7 @@ fn queueSubmitTracked(
 }
 
 pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) !void {
-    try self.queueSubmitTracked(handles, null);
+    try self.queueSubmitTracked(handles, null, null);
 }
 
 /// Set an NVIDIA diagnostic checkpoint in a command buffer.
@@ -2026,7 +2133,22 @@ pub fn queueSubmitSignal(
     sem: SemaphoreHandle,
     value: u64,
 ) !void {
-    try self.queueSubmitTracked(handles, .{ .semaphore = sem, .value = value });
+    try self.queueSubmitTracked(handles, null, .{ .semaphore = sem, .value = value });
+}
+
+pub fn queueSubmitWaitSignal(
+    self: *VkBackend,
+    handles: []const CommandBufferHandle,
+    wait_sem: SemaphoreHandle,
+    wait_value: u64,
+    signal_sem: SemaphoreHandle,
+    signal_value: u64,
+) !void {
+    try self.queueSubmitTracked(
+        handles,
+        .{ .semaphore = wait_sem, .value = wait_value },
+        .{ .semaphore = signal_sem, .value = signal_value },
+    );
 }
 
 fn reclaimSubmittedWork(self: *VkBackend) void {
@@ -2198,7 +2320,7 @@ fn pollPresentFeedbackExt(self: *VkBackend, win: *Window, out: []PresentFeedback
     // address in the generated non-null Vulkan declaration.
     var probe_properties: PastPresentationTimingPropertiesProbe = .{};
     const probe_info: vk.PastPresentationTimingInfoEXT = .{
-        .flags = .{ .allow_out_of_order_results_bit_ext = true },
+        .flags = .{},
         .swapchain = win.swapchain,
     };
     const probe_result = self.device.getPastPresentationTimingEXT(
@@ -2332,9 +2454,7 @@ fn pollPresentFeedbackExt(self: *VkBackend, win: *Window, out: []PresentFeedback
         return err;
     };
     win.present_timing_diagnostics.notePollResult(completed);
-    if (win.outstanding_timed_presents == 0) {
-        win.first_timed_present_start_ns = null;
-    }
+    self.notePresentTimingProgress(win, completed);
     win.present_timing_diagnostics.outstanding_timed_presents = win.outstanding_timed_presents;
     return completed;
 }
@@ -2430,9 +2550,7 @@ fn pollPresentFeedbackGoogle(self: *VkBackend, win: *Window, out: []PresentFeedb
         return err;
     };
     win.present_timing_diagnostics.notePollResult(completed);
-    if (win.outstanding_timed_presents == 0) {
-        win.first_timed_present_start_ns = null;
-    }
+    self.notePresentTimingProgress(win, completed);
     win.present_timing_diagnostics.outstanding_timed_presents = win.outstanding_timed_presents;
     return completed;
 }
@@ -3238,6 +3356,15 @@ pub fn cmdBindDescriptorSets(self: *VkBackend, cmd: CommandBufferHandle, heap: u
 pub fn deviceLimits(self: *const VkBackend) DeviceLimits {
     return self.device_limits;
 }
+
+pub fn deviceIdentity(self: *const VkBackend) DeviceIdentity {
+    return .{
+        .name = self.selected_device_name[0..self.selected_device_name_len],
+        .vendor_id = self.selected_vendor_id,
+        .device_id = self.selected_device_id,
+        .driver = self.selected_driver_name[0..self.selected_driver_name_len],
+    };
+}
 pub fn surfaceSize(self: *const VkBackend, window_index: u32) Extent2D {
     if (window_index < self.windows.items.len) return self.windows.items[window_index].extent;
     return .{ .width = 800, .height = 600 };
@@ -3364,17 +3491,25 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     }
     win.extent = .{ .width = extent.width, .height = extent.height }; // actual extent
 
-    // Surface formats
+    // Surface formats, preferred order: b8g8r8a8_srgb/srgb_nonlinear ->
+    // r8g8b8a8_srgb/srgb_nonlinear -> b8g8r8a8_unorm/srgb_nonlinear -> first entry.
     const formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.physical_device, win.surface, alloc);
     defer alloc.free(formats);
+    if (formats.len == 0) return error.OutOfDateKHR;
+    const preferences = [_]vk.SurfaceFormatKHR{
+        .{ .format = .b8g8r8a8_srgb, .color_space = .srgb_nonlinear_khr },
+        .{ .format = .r8g8b8a8_srgb, .color_space = .srgb_nonlinear_khr },
+        .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
+    };
     var chosen_format: vk.SurfaceFormatKHR = formats[0];
-    for (formats) |f| {
-        if (f.format == .b8g8r8a8_srgb and f.color_space == .srgb_nonlinear_khr) {
-            chosen_format = f;
-            break;
+    outer: for (preferences) |want| {
+        for (formats) |f| {
+            if (f.format == want.format and f.color_space == want.color_space) {
+                chosen_format = f;
+                break :outer;
+            }
         }
     }
-    win.swapchain_format = chosen_format.format;
 
     // Present modes
     const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(
@@ -4995,6 +5130,32 @@ test "task4 present timing watchdog uses monotonic deadline boundaries" {
     try std.testing.expectEqual(
         PresentTimingWatchdogDecision.wait,
         presentTimingWatchdogDecision(1, null, start + 5_000_000_000),
+    );
+}
+test "task4 present timing watchdog resets after completed progress" {
+    const initial_start: ?i96 = 100;
+    const progressed_start = presentTimingWatchdogProgressStart(
+        1,
+        initial_start,
+        5_000_000_100,
+        1,
+    );
+    try std.testing.expectEqual(@as(?i96, 5_000_000_100), progressed_start);
+    try std.testing.expectEqual(
+        PresentTimingWatchdogDecision.wait,
+        presentTimingWatchdogDecision(1, progressed_start, 9_999_999_999),
+    );
+    try std.testing.expectEqual(
+        PresentTimingWatchdogDecision.disable,
+        presentTimingWatchdogDecision(1, progressed_start, 10_000_000_100),
+    );
+    try std.testing.expectEqual(
+        @as(?i96, null),
+        presentTimingWatchdogProgressStart(0, progressed_start, 10_000_000_100, 1),
+    );
+    try std.testing.expectEqual(
+        initial_start,
+        presentTimingWatchdogProgressStart(1, initial_start, 10_000_000_100, 0),
     );
 }
 

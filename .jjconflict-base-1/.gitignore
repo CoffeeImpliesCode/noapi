@@ -1,0 +1,16 @@
+.envrc
+costs.md
+.devenv/
+.direnv/
+.codegraph/
+.omo/
+.opencode/
+/agent-notes
+.zig-cache/
+zig-out/
+zig-pkg/
+codedb.snapshot
+graphify-out/
+transcripts/
+
+

@@ -11,9 +11,8 @@ const Semaphore = @import("Semaphore.zig");
 const Buffer = @import("Buffer.zig");
 const CommandBuffer = @import("CommandBuffer.zig");
 const TimestampQuerySet = @import("TimestampQuerySet.zig");
-
-const DescriptorHeap = @import("DescriptorHeap.zig");
 const Texture = @import("Texture.zig");
+const DescriptorHeap = @import("DescriptorHeap.zig");
 
 // Imports for types used internally (no longer re-exported — root.zig handles that)
 const TextureHandle = @import("TextureHandle.zig");
@@ -40,6 +39,11 @@ pub const SemaphoreHandle = VkBackend.SemaphoreHandle;
 pub const BufferHandle = VkBackend.BufferHandle;
 pub const QueueHandle = VkBackend.QueueHandle;
 pub const TimestampQueryHandle = VkBackend.TimestampQueryHandle;
+pub const DeviceIdentity = VkBackend.DeviceIdentity;
+
+pub fn deviceIdentity(self: *const Gpu) DeviceIdentity {
+    return self.backend.deviceIdentity();
+}
 
 backend: *VkBackend,
 frames_in_flight: u5,
@@ -112,7 +116,6 @@ pub fn numSurfaces(self: *const Gpu) u32 {
 pub fn deviceLimits(self: *const Gpu) DeviceLimits {
     return self.backend.deviceLimits();
 }
-
 pub fn timestampInfo(self: *const Gpu) ?TimestampQuerySet.TimestampInfo {
     return self.backend.timestampInfo();
 }
@@ -231,6 +234,27 @@ pub fn queueSubmit(self: *Gpu, cmd_bufs: []const CommandBuffer) !void {
     try self.backend.queueSubmit(copied_handles);
 }
 
+pub fn queueSubmitWaitSignal(
+    self: *Gpu,
+    cmd_bufs: []const CommandBuffer,
+    wait_sem: Semaphore,
+    wait_value: u64,
+    signal_sem: Semaphore,
+    signal_value: u64,
+) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+    var handles: [64]CommandBufferHandle = undefined;
+    const copied_handles = try copyCommandBufferHandles(cmd_bufs, &handles);
+    try self.backend.queueSubmitWaitSignal(
+        copied_handles,
+        wait_sem.handle,
+        wait_value,
+        signal_sem.handle,
+        signal_value,
+    );
+}
+
 pub fn descHeapCreate(self: *Gpu, texture_count: u32, texture_rw_count: u32, sampler_count: u32) !DescriptorHeap {
     const idx = try self.backend.descHeapCreate(texture_count, texture_rw_count, sampler_count);
     return .{ .index = idx };
@@ -271,6 +295,7 @@ pub fn instanceHandle(self: *const Gpu) vk.Instance {
 }
 
 // Basic types
+
 pub const FrameSchedule = struct { next_vblank_us: u32, swapchain_recreated: bool };
 pub const FrameResult = struct {
     gpu_blocked_ns: u64,
