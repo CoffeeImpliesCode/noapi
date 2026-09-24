@@ -18,3 +18,4 @@ Public types live under `noapi/` and are re-exported by `root.zig`. Public files
 - BVH and ray tracing are not implemented; they are deferred.
 - Prefer explicit `descHeap` / `DescriptorPool.bindDescriptorSets` over `CommandBuffer.bindTexture`'s private lazy heap.
 - Frame pacing is inconsistent: `3_3D`, `5_indirect_triangles`, and `6_compute_shaders` use timeline `frame_sem`; other examples busy-loop on `FrameTimer`.
+- Examples allocate buffers through `Gpu.gpuMalloc` and `GpuPtr`, not the `Buffer` wrapper exposed by `Gpu.bufferCreate` and `Gpu.bufferDestroy`.
