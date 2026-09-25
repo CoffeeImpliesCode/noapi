@@ -22,6 +22,20 @@ pub fn create(gpu: *Gpu, spv: []const u32, stage: ShaderStage, entry: [:0]const 
     return .{ .gpu = gpu, .handle = handle, .stage = stage };
 }
 
+pub fn createWgsl(
+    gpu: *Gpu,
+    source: []const u8,
+    stage: ShaderStage,
+    entry: [:0]const u8,
+    name: [:0]const u8,
+) !Shader {
+    const handle = if (comptime @hasDecl(@TypeOf(gpu.backend.*), "shaderCreateWgsl"))
+        try gpu.backend.shaderCreateWgsl(source, @intFromEnum(stage), entry, name)
+    else
+        return error.WgslUnsupportedByBackend;
+    return .{ .gpu = gpu, .handle = handle, .stage = stage };
+}
+
 pub fn createFromPath(
     alloc: std.mem.Allocator,
     io: Io,

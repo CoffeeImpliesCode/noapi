@@ -1,7 +1,6 @@
 // zlint-disable unused-decls -- public API type, re-exported via root.zig
 //! Viewport and scissor state.
 const std = @import("std");
-const Viewport = @This();
 
 x: f32 = 0,
 y: f32 = 0,

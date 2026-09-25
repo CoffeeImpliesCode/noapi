@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const vk = @import("vk.zig");
+const builtin = @import("builtin");
+const WebGpuBackend = @import("WebGpuBackend.zig").WebGpuBackend;
 const VkBackend = @import("VkBackend.zig").VkBackend;
 
 const Shader = @import("Shader.zig");
@@ -32,20 +34,21 @@ const log = std.log.scoped(.gpu);
 
 pub const Gpu = @This();
 
-pub const Backend = VkBackend;
-pub const CommandBufferHandle = VkBackend.CommandBufferHandle;
-pub const ShaderHandle = VkBackend.ShaderHandle;
-pub const SemaphoreHandle = VkBackend.SemaphoreHandle;
-pub const BufferHandle = VkBackend.BufferHandle;
-pub const QueueHandle = VkBackend.QueueHandle;
-pub const TimestampQueryHandle = VkBackend.TimestampQueryHandle;
-pub const DeviceIdentity = VkBackend.DeviceIdentity;
+const is_webgpu_target = builtin.target.os.tag == .emscripten;
+pub const Backend = if (is_webgpu_target) WebGpuBackend else VkBackend;
+pub const CommandBufferHandle = Backend.CommandBufferHandle;
+pub const ShaderHandle = Backend.ShaderHandle;
+pub const SemaphoreHandle = Backend.SemaphoreHandle;
+pub const BufferHandle = Backend.BufferHandle;
+pub const QueueHandle = Backend.QueueHandle;
+pub const TimestampQueryHandle = Backend.TimestampQueryHandle;
+pub const DeviceIdentity = Backend.DeviceIdentity;
 
 pub fn deviceIdentity(self: *const Gpu) DeviceIdentity {
     return self.backend.deviceIdentity();
 }
 
-backend: *VkBackend,
+backend: *Backend,
 frames_in_flight: u5,
 frame_index: u5 = 0,
 allocator: std.mem.Allocator = std.heap.page_allocator,
@@ -67,8 +70,13 @@ pub const Options = struct {
 pub fn init(options: Options) !Gpu {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    return .{
-        .backend = try VkBackend.init(.{
+    const backend = if (comptime is_webgpu_target)
+        try WebGpuBackend.init(.{
+            .allocator = options.allocator,
+            .frames_in_flight = options.frames_in_flight,
+        })
+    else
+        try VkBackend.init(.{
             .app_name = options.app_name,
             .validation = options.validation,
             .frames_in_flight = options.frames_in_flight,
@@ -80,7 +88,9 @@ pub fn init(options: Options) !Gpu {
             .enable_nv_diagnostics = options.enable_nv_diagnostics,
             .enable_device_fault = options.enable_device_fault,
             .timestamp_queries = options.timestamp_queries,
-        }),
+        });
+    return .{
+        .backend = backend,
         .frames_in_flight = options.frames_in_flight,
         .allocator = options.allocator,
     };
@@ -291,6 +301,7 @@ pub fn gpuHostToDevicePointer(self: *Gpu, cpu_ptr: [*]u8) GpuPtr {
 }
 
 pub fn instanceHandle(self: *const Gpu) vk.Instance {
+    if (comptime is_webgpu_target) return .null_handle;
     return self.backend.instance.handle;
 }
 

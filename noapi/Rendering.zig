@@ -2,7 +2,6 @@
 //! Rendering attachment description for dynamic rendering.
 const std = @import("std");
 const TextureHandle = @import("TextureHandle.zig");
-const Rendering = @This();
 
 pub const LoadOp = enum(u2) {
     load = 0,

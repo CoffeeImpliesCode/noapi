@@ -95,6 +95,35 @@ pub fn build(b: *std.Build) void {
     });
     presentation_feedback_step.dependOn(&presentation_feedback_cmd.step);
 
+    const native_triangle_vert_cmd = b.addSystemCommand(&.{"slangc"});
+    native_triangle_vert_cmd.addArgs(&.{
+        "-target", "spirv", "-DNOAPI_WEB=0", "-entry", "vertexMain", "-o",
+    });
+    const native_triangle_vert_spv = native_triangle_vert_cmd.addOutputFileArg(
+        "triangle_slang_vert.spv",
+    );
+    native_triangle_vert_cmd.addFileArg(b.path("shaders/triangle.slang"));
+
+    const native_triangle_frag_cmd = b.addSystemCommand(&.{"slangc"});
+    native_triangle_frag_cmd.addArgs(&.{
+        "-target", "spirv", "-DNOAPI_WEB=0", "-entry", "fragmentMain", "-o",
+    });
+    const native_triangle_frag_spv = native_triangle_frag_cmd.addOutputFileArg(
+        "triangle_slang_frag.spv",
+    );
+    native_triangle_frag_cmd.addFileArg(b.path("shaders/triangle.slang"));
+
+    const install_native_triangle_vert = b.addInstallFile(
+        native_triangle_vert_spv,
+        "shaders/triangle_slang_vert.spv",
+    );
+    const install_native_triangle_frag = b.addInstallFile(
+        native_triangle_frag_spv,
+        "shaders/triangle_slang_frag.spv",
+    );
+    b.getInstallStep().dependOn(&install_native_triangle_vert.step);
+    b.getInstallStep().dependOn(&install_native_triangle_frag.step);
+
     // ── 1_triangle example executable ─────────────────────
     const exe_1_triangle = b.addExecutable(.{
         .name = "1_triangle",
@@ -304,4 +333,94 @@ pub fn build(b: *std.Build) void {
     });
     const docs_step = b.step("docs", "Generate documentation");
     docs_step.dependOn(&install_docs.step);
+    // The browser build is separate from the native default. It compiles only
+    // the WebGPU entry and noapi module, then links the archive with emcc.
+    const web_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .emscripten,
+    });
+    const web_tracy = b.dependency("tracy", .{
+        .target = web_target,
+        .optimize = optimize,
+    });
+    const web_noapi = b.createModule(.{
+        .root_source_file = b.path("noapi/root.zig"),
+        .target = web_target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "tracy", .module = web_tracy.module("tracy") },
+        },
+    });
+    const web_triangle_vert_cmd = b.addSystemCommand(&.{"slangc"});
+    web_triangle_vert_cmd.addArgs(&.{
+        "-target", "wgsl", "-DNOAPI_WEB=1", "-entry", "vertexMain", "-o",
+    });
+    const web_triangle_vert_wgsl = web_triangle_vert_cmd.addOutputFileArg(
+        "triangle_vert.wgsl",
+    );
+    web_triangle_vert_cmd.addFileArg(b.path("shaders/triangle.slang"));
+
+    const web_triangle_frag_cmd = b.addSystemCommand(&.{"slangc"});
+    web_triangle_frag_cmd.addArgs(&.{
+        "-target", "wgsl", "-DNOAPI_WEB=1", "-entry", "fragmentMain", "-o",
+    });
+    const web_triangle_frag_wgsl = web_triangle_frag_cmd.addOutputFileArg(
+        "triangle_frag.wgsl",
+    );
+    web_triangle_frag_cmd.addFileArg(b.path("shaders/triangle.slang"));
+
+    const web_sources = b.addWriteFiles();
+    const web_main_source = web_sources.addCopyFile(b.path("web/main.zig"), "main.zig");
+    _ = web_sources.addCopyFile(b.path("web/textures.wgsl"), "textures.wgsl");
+    _ = web_sources.addCopyFile(web_triangle_vert_wgsl, "triangle_vert.wgsl");
+    _ = web_sources.addCopyFile(web_triangle_frag_wgsl, "triangle_frag.wgsl");
+
+    const web_module = b.createModule(.{
+        .root_source_file = web_main_source,
+        .target = web_target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "noapi", .module = web_noapi },
+            .{ .name = "tracy", .module = web_tracy.module("tracy") },
+            .{ .name = "tracy_impl", .module = web_tracy.module("tracy_impl_disabled") },
+        },
+    });
+    const web_lib = b.addLibrary(.{
+        .name = "noapi-web",
+        .linkage = .static,
+        .root_module = web_module,
+    });
+    web_lib.use_llvm = true;
+    web_lib.bundle_compiler_rt = true;
+
+    const emcc = b.addSystemCommand(&.{"emcc"});
+    emcc.addArgs(&.{
+        "-O2",
+        "-sWASM=1",
+        "--no-entry",
+        "-sNO_EXIT_RUNTIME=1",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sMODULARIZE=1",
+        "-sEXPORT_ES6=1",
+        "-sEXPORT_NAME=createNoapi",
+        "-sEXPORTED_FUNCTIONS=_noapiStart,_noapiFrame,_noapiStop",
+    });
+    emcc.addArg("--js-library");
+    emcc.addFileArg(b.path("web/noapi-webgpu.js"));
+    emcc.addArtifactArg(web_lib);
+    emcc.addArg("-o");
+    const web_js = emcc.addOutputFileArg("noapi.js");
+
+    const install_web_output = b.addInstallDirectory(.{
+        .source_dir = web_js.dirname(),
+        .install_dir = .{ .custom = "web" },
+        .install_subdir = "",
+    });
+    install_web_output.step.dependOn(&emcc.step);
+    const install_web_index = b.addInstallFile(b.path("web/index.html"), "web/index.html");
+    const web_step = b.step("web", "Build the WebGPU browser examples with emcc");
+    web_step.dependOn(&install_web_output.step);
+    web_step.dependOn(&install_web_index.step);
 }

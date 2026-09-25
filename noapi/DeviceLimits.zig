@@ -1,7 +1,6 @@
 // zlint-disable unused-decls -- public API type, re-exported via root.zig
 //! Device limits — GPU capabilities queried at init time.
 const std = @import("std");
-const DeviceLimits = @This();
 
 max_anisotropy: f32 = 16.0,
 max_texture_dimension_2d: u32 = 16384,

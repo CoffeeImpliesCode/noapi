@@ -113,8 +113,6 @@ pub const App = struct {
         timestamp_queries: bool,
     ) !App {
         // SDL3
-        try sdl3.hints.set(.video_driver, "wayland");
-        try sdl3.hints.set(.render_driver, "vulkan");
         try sdl3.init(.{ .video = true, .events = true });
         errdefer sdl3.quit(.{ .video = true, .events = true });
 
