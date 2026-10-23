@@ -1,6 +1,6 @@
 //! 1_triangle — minimal triangle demo.
 //! Port of the upstream 1_triangle Odin example.
-//! Uses a Slang vertex shader and a buffer device address for vertex data.
+//! Uses hardcoded vertex shader (triangle_vert.spv) — no vertex buffers needed.
 
 const std = @import("std");
 const common = @import("common");
@@ -13,15 +13,6 @@ pub const tracy_options = common.tracy_options;
 const start_width = 1000;
 const start_height = 1000;
 const frames_in_flight = 3;
-
-const TriangleVertex = extern struct {
-    position: [4]f32,
-    color: [4]f32,
-};
-
-comptime {
-    std.debug.assert(@sizeOf(TriangleVertex) == 32);
-}
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -37,47 +28,22 @@ pub fn main(init: std.process.Init) !void {
         gpa,
         io,
         app.gpu,
-        "zig-out/shaders/triangle_slang_vert.spv",
+        "shaders/triangle_vert.spv",
         .vertex,
         "main",
-        "triangle_slang_vert",
+        "triangle_vert",
     );
     defer vert_shader.destroy();
     const frag_shader = try noapi.Shader.createFromPath(
         gpa,
         io,
         app.gpu,
-        "zig-out/shaders/triangle_slang_frag.spv",
+        "shaders/triangle_frag.spv",
         .fragment,
         "main",
-        "triangle_slang_frag",
+        "triangle_frag",
     );
     defer frag_shader.destroy();
-
-    const triangle_buffer = try app.gpu.gpuMalloc(
-        @sizeOf(TriangleVertex) * 4,
-        16,
-        .default,
-    );
-    defer app.gpu.gpuFree(triangle_buffer);
-
-    const triangle_vertices: [*]TriangleVertex = @ptrCast(@alignCast(triangle_buffer.cpu));
-    triangle_vertices[0] = .{
-        .position = .{ -2, -2, 0, 1 },
-        .color = .{ 1, 0, 1, 1 },
-    };
-    triangle_vertices[1] = .{
-        .position = .{ -0.5, -0.5, 0, 1 },
-        .color = .{ 1, 0.5, 0, 1 },
-    };
-    triangle_vertices[2] = .{
-        .position = .{ 0.5, -0.5, 0, 1 },
-        .color = .{ 0, 1, 0.5, 1 },
-    };
-    triangle_vertices[3] = .{
-        .position = .{ 0, 0.5, 0, 1 },
-        .color = .{ 0.25, 0, 1, 1 },
-    };
 
     var timer = common.FrameTimer.init();
     var t: f32 = 0;
@@ -140,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
 
         cmd.setShaders(vert_shader, frag_shader);
         cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .none });
-        cmd.draw(.{ .vert_data = triangle_buffer.offset(@sizeOf(TriangleVertex)).gpu }, 3, 1);
+        cmd.draw(.{}, 3, 1);
 
         cmd.endRendering();
 

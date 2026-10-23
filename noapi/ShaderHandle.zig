@@ -1,5 +1,6 @@
 // zlint-disable unused-decls -- public API type, re-exported via root.zig
 //! Shader handle + stage enum.
+const ShaderHandle = @This();
 
 id: u32 = 0,
 stage: ShaderStage = .vertex,

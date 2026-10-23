@@ -1,6 +1,7 @@
 // zlint-disable unused-decls -- public API type, re-exported via root.zig
 //! Depth-stencil state object.
 const std = @import("std");
+const DepthState = @This();
 
 pub const CompareOp = enum(u3) {
     never = 0,

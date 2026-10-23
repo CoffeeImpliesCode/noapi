@@ -1,9 +1,9 @@
 # noapi — Current State & Analysis
 
-**Build**: `zig build` and `zig build -Denable-tracy=false` pass; `zig build -Doptimize=ReleaseFast` passes.
-**Tests**: 58/58 library tests pass in Debug, ReleaseSafe, and ReleaseFast; the offscreen submission check passes in Debug, ReleaseFast, and without Tracy.
-**Runtime**: All seven examples reach an FPS report on the NVIDIA GeForce GTX 1660 Ti.
-**Zig**: 0.16.0, LLVM backend forced on all executables.
+**Build**: `zig build` ✓ | `zig build -Denable-tracy=true` ✓  
+**Validation**: 0 errors across examples 1-6  
+**Tracy**: 42 CPU zones (API) + 15 blocking backend zones (tomato), `-Denable-tracy=true` build option  
+**Zig**: 0.16.0, LLVM backend forced on all exes  
 
 ## Completed Work
 
@@ -22,7 +22,7 @@
 - Present mode flows through to swapchain creation (no hardcoded MAILBOX override)
 - Swapchain barrier: `old_layout = .undefined` (not `.present_src_khr`)
 - `draw_indirect_count = .true` in vk12 features
-- Surface formats prefer `b8g8r8a8_srgb`, then `r8g8b8a8_srgb`, then `b8g8r8a8_unorm`, all with `srgb_nonlinear_khr`. Otherwise, use the first supported format.
+- Surface formats: picks `b8g8r8a8_srgb + srgb_nonlinear_khr`
 
 ### Enums (fixed to match Vulkan values)
 - `Rendering.LoadOp`: loads=0, clear=1, dont_care=2
@@ -36,10 +36,10 @@
 - `CommandBuffer.IndexFormat`: u16=0, u32=1, u8, none
 
 ### Tracy Setup
-- `-Denable-tracy` build option (enabled by default; `-Denable-tracy=false` disables instrumentation)
+- `-Denable-tracy` build option (disabled by default, zero-cost)
 - `tracy_impl` module on all 8 executables (enabled/disabled toggle)
 - `pub const tracy` + `tracy_impl` + `tracy_options` in all examples (must be `pub` for `@hasDecl(root, ...)`)
-- tracy_zig pinned to commit `b2ea5bf4b8fe80f7cd9226d0c4af88dc04e1e07b`
+- tracy_zig updated to latest commit `39cf5b55`
 
 ### Examples
 - Uniform FPS output: `"FPS: {d:.1}  frame: {d:.2}ms\n"` every 60 frames
@@ -49,7 +49,7 @@
 - 3_3D: default present_mode = .fifo
 - Present mode chain: SurfaceOptions → addWindow → swapchain (fully wired)
 
-## Previously Resolved Issues
+## Remaining Issues
 
 ### 1. GpuArena — RESOLVED
 Was: `create()` took no `*Gpu`, `gpuMalloc` unreachable, returned `BackendError`.
@@ -75,26 +75,15 @@ Now: `noapi/Gpu.zig:290` forwards to `noapi/VkBackend.zig:4640`, which scans `al
 Was: ~40 `pub const X = @import(...)` lines duplicated `root.zig`.
 Now: `noapi/Gpu.zig:298` tail holds only `FrameSchedule`/`FrameResult`/`PresentInfo`/`PresentFeedback` plus tests; public re-exports live in `noapi/root.zig`.
 
-## Runtime Checks and Limitations
+### 7. Swapchain format selection first-pick (P2, owned by SwapchainFormat task)
+`noapi/VkBackend.zig:3497` seeds `chosen_format = formats[0]`, then prefers `b8g8r8a8_srgb + srgb_nonlinear_khr`. Improved by preference order; full preference loop lands in the SwapchainFormat task.
 
-- `zig-gate` passes format, build, tests, AST, ziglint, and zlint checks.
-- `zwanzig --threads 4 noapi/[A-Z]*.zig noapi/root.zig` reports 15 findings, down from 30. Removed: 12 dead `@This()` aliases, two texture-heap unwraps, and the `L` variable.
-- The 15 remaining zwanzig findings are not applicable: 4 public API module names and 9 Vulkan/Tracy unwraps with non-null contracts.
-- The other 2 are a called method and a false ownership warning. zwanzig still exits 1.
-- Its AST walker warns that the 125-statement backend block exceeds its 64-statement analysis limit.
-- After the refactor, `zig build 2_textures` created and resized the swapchain, then reported FPS on the NVIDIA GeForce GTX 1660 Ti.
-- Six advisory texture-index findings have zero-ID and bounds guards.
-- `zig build submission-lifecycle` passes in Debug, ReleaseFast, and without Tracy on the NVIDIA GeForce GTX 1660 Ti.
-- `zig build presentation-feedback -Dpresentation-mode=selected` returned an EXT timestamp.
-- `zig build presentation-feedback -Dpresentation-mode=google` returned `GooglePresentTimingUnsupported` on this device.
-- With `SDL_VIDEODRIVER=wayland,x11`, all seven examples created and resized swapchains, then reported FPS. The two-window test app created both surfaces.
-- SDL now chooses the video driver. The app no longer sets hints that fail when the environment has priority.
-- To recheck SDL startup, run `SDL_VIDEODRIVER=wayland,x11 zig build 1_triangle`; wait for `FPS:`, then close the window.
-- Desktop capture was unavailable; these checks do not verify pixels. Other GPUs and window systems remain untested.
-- Instrumented library tests cover 365/3109 project lines (11.7%) and 222/1805 blocks (12.3%). GPU smoke checks are separate and not included.
+### 8. Example frame pacing — no sleep (P2, open)
+`3_3D`/`5_indirect_triangles`/`6_compute_shaders` pace with a timeline semaphore (`semaphoreWait` on `frame_sem`). `1_triangle`/`2_textures`/`4_textures_advanced`/`7_deferred_async_load` still busy-loop on `FrameTimer` only.
+**Fix**: extend semaphore pacing to the unpaced examples, or sleep on `FrameSchedule.next_vblank_us`.
 
 ## Timing Backport Status
-Ported from `lxrmvysx/vendor` pin `f11603da`:
+Backported from `lxrmvysx/vendor` pin `f11603da` into the working copy:
 - `TimestampQuerySet` (`noapi/TimestampQuerySet.zig`): `TimestampStage`, `TimestampInfo` (`mask`/`spanTicks`), `validateQueryRange`; `Gpu.timestampInfo/timestampQuerySetCreate/timestampQuerySetDestroy/timestampQuerySetRead`; `CommandBuffer.timestampReset/timestampWrite` with range checks; `VkBackend` query-pool create/read/reset/write with `TimestampQueriesUnsupported` guard.
 - Present feedback (`noapi/Surface.zig:105`, `noapi/VkBackend.zig:2281`): `pollPresentFeedback` writes into caller storage, never allocates, returns `OutputTooSmall` before it consumes a record; EXT/GOOGLE timing backends behind a 64-record bounded scratch drain.
 - `deviceIdentity` (`noapi/Gpu.zig:44`, `noapi/VkBackend.zig:3360`): name, vendor/device id, driver string from the selected physical device.

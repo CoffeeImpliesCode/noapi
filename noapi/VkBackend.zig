@@ -973,22 +973,22 @@ pub fn init(options: Options) !*VkBackend {
 
     // Query device limits from Vulkan.
     {
-        const limits = &gpu_props.limits;
+        const L = gpu_props.limits;
         self.device_limits = .{
-            .max_anisotropy = limits.max_sampler_anisotropy,
-            .max_texture_dimension_2d = limits.max_image_dimension_2d,
-            .max_texture_dimension_3d = limits.max_image_dimension_3d,
-            .max_texture_array_layers = limits.max_image_array_layers,
-            .max_push_constants_size = limits.max_push_constants_size,
-            .max_viewports = limits.max_viewports,
-            .max_color_attachments = limits.max_color_attachments,
-            .max_framebuffer_width = limits.max_framebuffer_width,
-            .max_framebuffer_height = limits.max_framebuffer_height,
-            .max_framebuffer_layers = limits.max_framebuffer_layers,
-            .max_compute_work_group_invocations = limits.max_compute_work_group_invocations,
-            .max_compute_shared_memory_size = limits.max_compute_shared_memory_size,
-            .min_uniform_buffer_offset_alignment = @intCast(limits.min_uniform_buffer_offset_alignment),
-            .min_storage_buffer_offset_alignment = @intCast(limits.min_storage_buffer_offset_alignment),
+            .max_anisotropy = L.max_sampler_anisotropy,
+            .max_texture_dimension_2d = L.max_image_dimension_2d,
+            .max_texture_dimension_3d = L.max_image_dimension_3d,
+            .max_texture_array_layers = L.max_image_array_layers,
+            .max_push_constants_size = L.max_push_constants_size,
+            .max_viewports = L.max_viewports,
+            .max_color_attachments = L.max_color_attachments,
+            .max_framebuffer_width = L.max_framebuffer_width,
+            .max_framebuffer_height = L.max_framebuffer_height,
+            .max_framebuffer_layers = L.max_framebuffer_layers,
+            .max_compute_work_group_invocations = L.max_compute_work_group_invocations,
+            .max_compute_shared_memory_size = L.max_compute_shared_memory_size,
+            .min_uniform_buffer_offset_alignment = @intCast(L.min_uniform_buffer_offset_alignment),
+            .min_storage_buffer_offset_alignment = @intCast(L.min_storage_buffer_offset_alignment),
             // Feature flags — all enabled by the device features struct in init.
             .shader_object = true,
             .descriptor_buffer = true,
@@ -1920,10 +1920,9 @@ fn queueSubmitTracked(
     self.queue_mutex.lockUncancelable(self.io);
     defer self.queue_mutex.unlock(self.io);
 
-    // Ownership of cmds_copy transfers to self.submitted_work on success; every
-    // earlier exit frees it.
     const cmds_copy = try self.allocator.dupe(vk.CommandBuffer, handles);
-    errdefer self.allocator.free(cmds_copy);
+    var tracking_owned = true;
+    defer if (tracking_owned) self.allocator.free(cmds_copy);
 
     try self.submitted_work.ensureUnusedCapacity(self.allocator, 1);
     const fence = try self.device.createFence(&.{}, null);
@@ -1985,6 +1984,7 @@ fn queueSubmitTracked(
 
     submitted = true;
     self.submitted_work.appendAssumeCapacity(.{ .cmds = cmds_copy, .fence = fence });
+    tracking_owned = false;
 }
 
 pub fn queueSubmit(self: *VkBackend, handles: []const CommandBufferHandle) !void {
@@ -4603,9 +4603,7 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
 
     var cpu: ?[*]u8 = null;
     if (mem_type != .gpu) {
-        const mapped = (try self.device.mapMemory(memory, 0, size, .{})) orelse
-            return error.MemoryMapFailed;
-        cpu = @ptrCast(mapped);
+        cpu = @ptrCast((try self.device.mapMemory(memory, 0, size, .{})).?);
     }
 
     const addr_info: vk.BufferDeviceAddressInfo = .{ .buffer = buf };

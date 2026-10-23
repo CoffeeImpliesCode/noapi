@@ -74,8 +74,8 @@ pub fn timestampWrite(
     try self.gpu.backend.cmdTimestampWrite(self.handle, set.handle, index, stage);
 }
 
-/// Begin a Tracy GPU zone. Support depends on the backend; unsupported backends
-/// report an error when the frame completes.
+/// Begin a Tracy GPU zone — recorded as a Vulkan timestamp query pair into
+/// the current frame's query pool; shows as a span on the GPU track.
 pub fn beginZone(self: *CommandBuffer, comptime loc: tracy.SourceLocation.InitOptions) void {
     self.gpu.backend.cmdBufBeginZone(self.handle, tracy.SourceLocation.init(loc));
 }
@@ -221,22 +221,18 @@ pub fn bindDescriptorSets(self: *CommandBuffer, heap: DescriptorHeap) void {
     defer zone.end();
     self.gpu.backend.cmdBindDescriptorSets(self.handle, heap.index);
 }
-/// Bind a texture at slots 0–7.
-/// Vulkan uses a private descriptor heap. WebGPU binds texture slots 0 and 1 directly.
+/// Bind a texture into this command buffer's private descriptor heap (slot 0-7; slot >= 8 ignored).
+/// Creates the heap lazily on first use and binds it once. Call deinitTexHeap
+/// before command buffer reuse or the heap leaks.
 pub fn bindTexture(self: *CommandBuffer, slot: u32, texture: TextureHandle, sampler: ?SamplerDesc) void {
     if (slot >= 8) return;
-    if (comptime @hasDecl(@TypeOf(self.gpu.backend.*), "cmdBindTexture")) {
-        self.gpu.backend.cmdBindTexture(self.handle, slot, texture, sampler);
-        return;
-    }
-    const heap = self.tex_heap orelse blk: {
-        const created = self.gpu.descHeapCreate(8, 0, 8) catch return;
-        self.tex_heap = created;
+    if (self.tex_heap == null) {
+        self.tex_heap = self.gpu.descHeapCreate(8, 0, 8) catch return;
         self.tex_count = 0;
         self.tex_samp_count = 0;
-        self.gpu.backend.cmdBindDescriptorSets(self.handle, created.index);
-        break :blk created;
-    };
+        self.gpu.backend.cmdBindDescriptorSets(self.handle, self.tex_heap.?.index);
+    }
+    const heap = self.tex_heap.?;
     if (self.tex_count <= slot) self.tex_count = slot + 1;
     const tex_desc = self.gpu.textureViewDescriptor(texture, .{});
     self.gpu.descHeapSetTextures(heap, slot, &.{tex_desc});

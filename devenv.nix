@@ -25,8 +25,6 @@ rec {
     xorg.libXext
     xorg.libXi
     xorg.libxcb
-    # Provides emcc for `zig build web`.
-    emscripten
     tracy_0_11
     mangohud
     zig-zlint

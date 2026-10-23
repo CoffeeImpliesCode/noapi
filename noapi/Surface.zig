@@ -1,5 +1,7 @@
-//! Surface — native or browser presentation target.
-//! Native surfaces use Vulkan swapchains; Web surfaces use a WebGPU canvas.
+//! Surface — unified API-level handle for a Vulkan surface + swapchain.
+//! Replaces both Gpu.Window and PlatformWindow. Created from a vk.SurfaceKHR
+//! obtained from the platform (e.g. SDL3); delegates all per-window work to
+//! the VkBackend.
 
 const std = @import("std");
 const tracy = @import("tracy");
@@ -48,15 +50,6 @@ pub fn init(gpu: *Gpu, vk_surface: vk.SurfaceKHR, options: SurfaceOptions) !Surf
     return .{ .gpu = gpu, .index = idx };
 }
 
-pub fn initWeb(gpu: *Gpu, selector: []const u8, options: SurfaceOptions) !Surface {
-    if (comptime @hasDecl(@TypeOf(gpu.backend.*), "addWebSurface")) {
-        if (options.present_mode != .fifo) return error.UnsupportedPresentMode;
-        const idx = try gpu.backend.addWebSurface(selector, options.extent);
-        return .{ .gpu = gpu, .index = idx };
-    }
-    return error.WebGpuUnavailable;
-}
-
 pub fn deinit(self: *Surface) void {
     self.gpu.backend.removeWindow(self.index);
     self.* = undefined;
@@ -96,21 +89,19 @@ pub fn notifyResize(self: *Surface, extent: Extent2D) void {
 /// CPU nanoseconds spent blocked on the GPU this frame (acquire/present/fence
 /// waits). Resets to 0 at the start of each beginFrame. 0 if unavailable.
 pub fn slopNs(self: *Surface) u64 {
-    if (comptime @hasField(@TypeOf(self.gpu.backend.*), "windows")) {
-        if (self.index >= self.gpu.backend.windows.items.len) return 0;
-        return self.gpu.backend.windows.items[self.index].slop_ns;
-    }
-    return 0;
+    if (self.index >= self.gpu.backend.windows.items.len) return 0;
+    return self.gpu.backend.windows.items[self.index].slop_ns;
 }
 
-/// True when this backend exposes presentation timestamps for completed frames.
+/// True when the presentation engine reports actual presentation timestamps
+/// through VK_EXT_present_timing or VK_GOOGLE_display_timing.
 pub fn supportsPresentTiming(self: *const Surface) bool {
     return self.gpu.backend.presentTimingSupported(self.index);
 }
 
-/// Poll completed presentation feedback into caller storage.
-/// Unsupported backends return an error. Supported backends do not allocate
-/// and return OutputTooSmall before consuming records.
+/// Poll completed presentation feedback into caller storage. Never allocates
+/// and never drops records: OutputTooSmall is returned before consuming any
+/// driver record when the storage cannot hold all completed feedback.
 pub fn pollPresentFeedback(self: *Surface, out: []PresentFeedback) !usize {
     return self.gpu.backend.pollPresentFeedback(self.index, out);
 }
