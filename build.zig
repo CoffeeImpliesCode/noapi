@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const release_safe = std.builtin.OptimizeMode.ReleaseSafe;
+    const release_safe = std.lang.Optimize.safe;
     const sdl3 = b.dependency("sdl3", .{ .target = target, .optimize = release_safe });
     const tracy = b.dependency("tracy", .{ .target = target, .optimize = release_safe });
     const enable_tracy = b.option(bool, "enable-tracy", "Enable Tracy profiler") orelse true;
@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
 
     const submission_lifecycle_step = b.step(
         "submission-lifecycle",
@@ -120,7 +120,7 @@ pub fn build(b: *std.Build) void {
     const run_1_triangle_cmd = b.addRunArtifact(exe_1_triangle);
     run_1_triangle_step.dependOn(&run_1_triangle_cmd.step);
     run_1_triangle_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_1_triangle_cmd.addArgs(args);
+    run_1_triangle_cmd.addPassthruArgs();
 
     // ── 2_textures example ─────────────────────────────
     const tex_exe = b.addExecutable(.{
@@ -147,7 +147,7 @@ pub fn build(b: *std.Build) void {
     const tex_run_cmd = b.addRunArtifact(tex_exe);
     tex_run_step.dependOn(&tex_run_cmd.step);
     tex_run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| tex_run_cmd.addArgs(args);
+    tex_run_cmd.addPassthruArgs();
 
     // ── 3_3D example executable ──────────────────────────
     const exe_3d = b.addExecutable(.{
@@ -174,7 +174,7 @@ pub fn build(b: *std.Build) void {
     const run_3d_cmd = b.addRunArtifact(exe_3d);
     run_3d_step.dependOn(&run_3d_cmd.step);
     run_3d_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_3d_cmd.addArgs(args);
+    run_3d_cmd.addPassthruArgs();
 
     // ── 5_indirect_triangles example ──────────────────────
     const exe_5 = b.addExecutable(.{
@@ -201,7 +201,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd_5 = b.addRunArtifact(exe_5);
     run_step_5.dependOn(&run_cmd_5.step);
     run_cmd_5.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd_5.addArgs(args);
+    run_cmd_5.addPassthruArgs();
 
     // ── 4_textures_advanced example ────────────────────────
     const tex_adv_exe = b.addExecutable(.{
@@ -228,7 +228,7 @@ pub fn build(b: *std.Build) void {
     const tex_adv_run_cmd = b.addRunArtifact(tex_adv_exe);
     tex_adv_run_step.dependOn(&tex_adv_run_cmd.step);
     tex_adv_run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| tex_adv_run_cmd.addArgs(args);
+    tex_adv_run_cmd.addPassthruArgs();
 
     // ── 6_compute_shaders example ─────────────────────────
     const exe6 = b.addExecutable(.{
@@ -255,7 +255,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd6 = b.addRunArtifact(exe6);
     run_step6.dependOn(&run_cmd6.step);
     run_cmd6.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd6.addArgs(args);
+    run_cmd6.addPassthruArgs();
 
     // ── 7_deferred_async_load example ──────────────────────
     const exe_7 = b.addExecutable(.{
@@ -282,7 +282,7 @@ pub fn build(b: *std.Build) void {
     const run_7_cmd = b.addRunArtifact(exe_7);
     run_7_step.dependOn(&run_7_cmd.step);
     run_7_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_7_cmd.addArgs(args);
+    run_7_cmd.addPassthruArgs();
 
     // ── Tests ─────────────────────────────────
     const mod_tests = b.addTest(.{ .root_module = mod });

@@ -948,9 +948,9 @@ pub fn init(options: Options) !*VkBackend {
     log.info("GPU: {s}", .{@as([]const u8, &gpu_props.device_name)});
 
     var driver_props: vk.PhysicalDeviceDriverProperties = .{
-        .driver_id = @enumFromInt(0),
-        .driver_name = .{0} ** vk.MAX_DRIVER_NAME_SIZE,
-        .driver_info = .{0} ** vk.MAX_DRIVER_INFO_SIZE,
+        .driver_id = @fromBackingInt(@intCast(0)),
+        .driver_name = @splat(0),
+        .driver_info = @splat(0),
         .conformance_version = .{ .major = 0, .minor = 0, .subminor = 0, .patch = 0 },
     };
     var selected_properties: vk.PhysicalDeviceProperties2 = .{
@@ -1166,7 +1166,7 @@ pub fn init(options: Options) !*VkBackend {
         }) },
         null,
     );
-    self.setDebugName(.semaphore, @intFromEnum(self.queue_sem), "queue_sem");
+    self.setDebugName(.semaphore, @backingInt(self.queue_sem), "queue_sem");
     log.info("Queue timeline semaphore created", .{});
 
     // Offscreen command pool (transient, for one-shot command buffers)
@@ -1174,7 +1174,7 @@ pub fn init(options: Options) !*VkBackend {
         .queue_family_index = self.queue_family_index,
         .flags = .{ .transient_bit = true },
     }, null);
-    self.setDebugName(.command_pool, @intFromEnum(self.offscreen_cmd_pool), "offscreen_cmd_pool");
+    self.setDebugName(.command_pool, @backingInt(self.offscreen_cmd_pool), "offscreen_cmd_pool");
     log.info("Offscreen command pool created", .{});
 
     self.submitted_work = .empty;
@@ -1205,7 +1205,7 @@ pub fn init(options: Options) !*VkBackend {
                 .binding_count = 1,
                 .p_bindings = @ptrCast(&[_]vk.DescriptorSetLayoutBinding{bnd}),
             }, null);
-            self.setDebugName(.descriptor_set_layout, @intFromEnum(layout.*), label);
+            self.setDebugName(.descriptor_set_layout, @backingInt(layout.*), label);
         }
         log.info("Descriptor set layouts created", .{});
     }
@@ -1234,8 +1234,8 @@ pub fn init(options: Options) !*VkBackend {
             .set_layout_count = 3,
             .p_set_layouts = @ptrCast(&self.desc_layouts),
         }, null);
-        self.setDebugName(.pipeline_layout, @intFromEnum(self.pipeline_layout_graphics), "pipeline_layout_gfx");
-        self.setDebugName(.pipeline_layout, @intFromEnum(self.pipeline_layout_compute), "pipeline_layout_comp");
+        self.setDebugName(.pipeline_layout, @backingInt(self.pipeline_layout_graphics), "pipeline_layout_gfx");
+        self.setDebugName(.pipeline_layout, @backingInt(self.pipeline_layout_compute), "pipeline_layout_comp");
         log.info("Pipeline layouts created", .{});
     }
 
@@ -1405,7 +1405,7 @@ pub fn addWindow(
                         .{f},
                         0,
                     ) catch "present_fence";
-                    self.setDebugName(.fence, @intFromEnum(fence), fname);
+                    self.setDebugName(.fence, @backingInt(fence), fname);
                     w.present_done_fences.appendAssumeCapacity(fence);
                 }
             }
@@ -1448,7 +1448,7 @@ pub fn addWindow(
                 .{f},
                 0,
             ) catch "present_fence";
-            self.setDebugName(.fence, @intFromEnum(fence), fname);
+            self.setDebugName(.fence, @backingInt(fence), fname);
             win.present_done_fences.appendAssumeCapacity(fence);
         }
     }
@@ -2203,7 +2203,7 @@ pub fn timestampInfo(self: *const VkBackend) ?TimestampInfo {
 }
 
 fn timestampQueryEntry(self: *VkBackend, handle: TimestampQueryHandle) !*TimestampQueryEntry {
-    const raw = @intFromEnum(handle);
+    const raw = @backingInt(handle);
     if (raw == 0) return error.InvalidTimestampHandle;
     const index: usize = @intCast(raw - 1);
     if (index >= self.timestamp_query_sets.items.len) return error.InvalidTimestampHandle;
@@ -2224,7 +2224,7 @@ pub fn timestampQuerySetCreate(self: *VkBackend, count: u32) !TimestampQueryHand
     for (self.timestamp_query_sets.items, 0..) |*entry, i| {
         if (!entry.valid) {
             entry.* = .{ .valid = true, .pool = pool, .count = count };
-            return @enumFromInt(@as(u32, @intCast(i + 1)));
+            return @fromBackingInt(@intCast(@as(u32, @intCast(i + 1))));
         }
     }
     if (self.timestamp_query_sets.items.len >= std.math.maxInt(u32)) {
@@ -2235,11 +2235,11 @@ pub fn timestampQuerySetCreate(self: *VkBackend, count: u32) !TimestampQueryHand
         .pool = pool,
         .count = count,
     });
-    return @enumFromInt(@as(u32, @intCast(self.timestamp_query_sets.items.len)));
+    return @fromBackingInt(@intCast(@as(u32, @intCast(self.timestamp_query_sets.items.len))));
 }
 
 pub fn timestampQuerySetDestroy(self: *VkBackend, handle: TimestampQueryHandle) void {
-    const raw = @intFromEnum(handle);
+    const raw = @backingInt(handle);
     if (raw == 0) return;
     const index: usize = @intCast(raw - 1);
     if (index >= self.timestamp_query_sets.items.len) return;
@@ -2644,7 +2644,7 @@ pub fn shaderCreate(self: *VkBackend, spv: []const u32, stage: u2, entry: [:0]co
             else => "comp",
         };
         const sname = std.fmt.bufPrintSentinel(&name_buf, "shader_{s}_{s}", .{ stage_name, entry }, 0) catch "shader";
-        self.setDebugName(.shader_ext, @intFromEnum(shader_out[0]), sname);
+        self.setDebugName(.shader_ext, @backingInt(shader_out[0]), sname);
     }
     return shader_out[0];
 }
@@ -2684,27 +2684,27 @@ pub fn cmdSetComputeShader(self: *VkBackend, cmd: CommandBufferHandle, shader: S
 pub fn cmdSetDepthState(self: *VkBackend, cmd: CommandBufferHandle, state: DepthState) void {
     self.device.cmdSetDepthTestEnable(cmd, if (state.mode.read) @as(vk.Bool32, .true) else @as(vk.Bool32, .false));
     self.device.cmdSetDepthWriteEnable(cmd, if (state.mode.write) @as(vk.Bool32, .true) else @as(vk.Bool32, .false));
-    self.device.cmdSetDepthCompareOp(cmd, @as(vk.CompareOp, @enumFromInt(@intFromEnum(state.compare))));
+    self.device.cmdSetDepthCompareOp(cmd, @as(vk.CompareOp, @fromBackingInt(@intCast(@backingInt(state.compare)))));
     self.device.cmdSetDepthBiasEnable(cmd, @as(vk.Bool32, .false));
     self.device.cmdSetStencilTestEnable(cmd, @as(vk.Bool32, .false));
 }
 
 pub fn cmdSetRasterState(self: *VkBackend, cmd: CommandBufferHandle, state: RasterState) void {
-    self.device.cmdSetPrimitiveTopology(cmd, @enumFromInt(@intFromEnum(state.topology)));
-    self.device.cmdSetCullMode(cmd, @as(vk.CullModeFlags, @bitCast(@as(u32, @intFromEnum(state.cull_mode)))));
-    self.device.cmdSetFrontFace(cmd, @as(vk.FrontFace, @enumFromInt(@intFromEnum(state.front_face))));
+    self.device.cmdSetPrimitiveTopology(cmd, @fromBackingInt(@intCast(@backingInt(state.topology))));
+    self.device.cmdSetCullMode(cmd, @as(vk.CullModeFlags, @bitCast(@as(u32, @backingInt(state.cull_mode)))));
+    self.device.cmdSetFrontFace(cmd, @as(vk.FrontFace, @fromBackingInt(@intCast(@backingInt(state.front_face)))));
 }
 
 pub fn cmdSetBlendState(self: *VkBackend, cmd: CommandBufferHandle, state: BlendState) void {
     const enable = if (state.enable) @as(vk.Bool32, .true) else @as(vk.Bool32, .false);
     self.device.cmdSetColorBlendEnableEXT(cmd, 0, @as([]const vk.Bool32, &.{enable}));
     const eq: vk.ColorBlendEquationEXT = .{
-        .src_color_blend_factor = @as(vk.BlendFactor, @enumFromInt(@intFromEnum(state.src_color_factor))),
-        .dst_color_blend_factor = @as(vk.BlendFactor, @enumFromInt(@intFromEnum(state.dst_color_factor))),
-        .color_blend_op = @as(vk.BlendOp, @enumFromInt(@intFromEnum(state.color_op))),
-        .src_alpha_blend_factor = @as(vk.BlendFactor, @enumFromInt(@intFromEnum(state.src_alpha_factor))),
-        .dst_alpha_blend_factor = @as(vk.BlendFactor, @enumFromInt(@intFromEnum(state.dst_alpha_factor))),
-        .alpha_blend_op = @as(vk.BlendOp, @enumFromInt(@intFromEnum(state.alpha_op))),
+        .src_color_blend_factor = @as(vk.BlendFactor, @fromBackingInt(@intCast(@backingInt(state.src_color_factor)))),
+        .dst_color_blend_factor = @as(vk.BlendFactor, @fromBackingInt(@intCast(@backingInt(state.dst_color_factor)))),
+        .color_blend_op = @as(vk.BlendOp, @fromBackingInt(@intCast(@backingInt(state.color_op)))),
+        .src_alpha_blend_factor = @as(vk.BlendFactor, @fromBackingInt(@intCast(@backingInt(state.src_alpha_factor)))),
+        .dst_alpha_blend_factor = @as(vk.BlendFactor, @fromBackingInt(@intCast(@backingInt(state.dst_alpha_factor)))),
+        .alpha_blend_op = @as(vk.BlendOp, @fromBackingInt(@intCast(@backingInt(state.alpha_op)))),
     };
     self.device.cmdSetColorBlendEquationEXT(cmd, 0, @as([]const vk.ColorBlendEquationEXT, &.{eq}));
     const write_mask: vk.ColorComponentFlags = @bitCast(@as(u32, @as(u4, @bitCast(state.color_write_mask))));
@@ -2756,7 +2756,7 @@ pub fn cmdBindIndexBuffer(
     offset: u64,
     fmt: IndexFormat,
 ) void {
-    self.device.cmdBindIndexBuffer(cmd, buf, offset, @as(vk.IndexType, @enumFromInt(@intFromEnum(fmt))));
+    self.device.cmdBindIndexBuffer(cmd, buf, offset, @as(vk.IndexType, @fromBackingInt(@intCast(@backingInt(fmt)))));
 }
 
 pub fn cmdDraw(self: *VkBackend, cmd: CommandBufferHandle, vertex_count: u32, instance_count: u32) void {
@@ -2921,8 +2921,8 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
             .resolve_mode = .{},
             .resolve_image_view = .null_handle,
             .resolve_image_layout = .undefined,
-            .load_op = @as(vk.AttachmentLoadOp, @enumFromInt(@intFromEnum(ca.load_op))),
-            .store_op = @as(vk.AttachmentStoreOp, @enumFromInt(@intFromEnum(ca.store_op))),
+            .load_op = @as(vk.AttachmentLoadOp, @fromBackingInt(@intCast(@backingInt(ca.load_op)))),
+            .store_op = @as(vk.AttachmentStoreOp, @fromBackingInt(@intCast(@backingInt(ca.store_op)))),
             .clear_value = .{ .color = .{ .float_32 = ca.clear_color } },
         };
     }
@@ -2936,8 +2936,8 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
             .resolve_mode = .{},
             .resolve_image_view = .null_handle,
             .resolve_image_layout = .undefined,
-            .load_op = @as(vk.AttachmentLoadOp, @enumFromInt(@intFromEnum(da.load_op))),
-            .store_op = @as(vk.AttachmentStoreOp, @enumFromInt(@intFromEnum(da.store_op))),
+            .load_op = @as(vk.AttachmentLoadOp, @fromBackingInt(@intCast(@backingInt(da.load_op)))),
+            .store_op = @as(vk.AttachmentStoreOp, @fromBackingInt(@intCast(@backingInt(da.store_op)))),
             .clear_value = .{ .depth_stencil = .{ .depth = da.clear_depth, .stencil = da.clear_stencil } },
         };
     }
@@ -2984,8 +2984,8 @@ pub fn cmdBeginRendering(self: *VkBackend, cmd: CommandBufferHandle, desc: Rende
             .resolve_mode = .{},
             .resolve_image_view = .null_handle,
             .resolve_image_layout = .undefined,
-            .load_op = @as(vk.AttachmentLoadOp, @enumFromInt(@intFromEnum(sa.load_op))),
-            .store_op = @as(vk.AttachmentStoreOp, @enumFromInt(@intFromEnum(sa.store_op))),
+            .load_op = @as(vk.AttachmentLoadOp, @fromBackingInt(@intCast(@backingInt(sa.load_op)))),
+            .store_op = @as(vk.AttachmentStoreOp, @fromBackingInt(@intCast(@backingInt(sa.store_op)))),
             .clear_value = .{ .depth_stencil = .{ .depth = sa.clear_depth, .stencil = sa.clear_stencil } },
         };
     }
@@ -3574,7 +3574,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
         .old_swapchain = old_swapchain,
     };
     win.swapchain = try self.device.createSwapchainKHR(&swapchain_ci, null);
-    self.setDebugName(.swapchain_khr, @intFromEnum(win.swapchain), "swapchain");
+    self.setDebugName(.swapchain_khr, @backingInt(win.swapchain), "swapchain");
     if (win.timing_mode == .ext) {
         // Queue capacity is part of EXT support. Do not advertise EXT after
         // silently discarding a failed setup call.
@@ -3619,7 +3619,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
         var name_buf: [64]u8 = undefined;
         for (win.images.items, 0..) |img, i| {
             const name = std.fmt.bufPrintSentinel(&name_buf, "swapchain_img[{}]", .{i}, 0) catch "swapchain_img";
-            self.setDebugName(.image, @intFromEnum(img), name);
+            self.setDebugName(.image, @backingInt(img), name);
         }
     }
 
@@ -3645,7 +3645,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
                 },
             }, null);
             const vname = std.fmt.bufPrintSentinel(&name_buf, "swapchain_view[{}]", .{i}, 0) catch "swapchain_view";
-            self.setDebugName(.image_view, @intFromEnum(view), vname);
+            self.setDebugName(.image_view, @backingInt(view), vname);
             new_views.appendAssumeCapacity(view);
         }
     }
@@ -3658,7 +3658,7 @@ fn createSwapchainResources(self: *VkBackend, win: *Window) !void {
     const swapchain_generation = win.present_timing_diagnostics.swapchain_generation + 1;
     win.present_timing_diagnostics = .{
         .mode = win.timing_mode,
-        .swapchain_id = @intFromEnum(win.swapchain),
+        .swapchain_id = @backingInt(win.swapchain),
         .swapchain_generation = swapchain_generation,
         .present_stage_bits = @bitCast(win.present_stage_queries),
         .time_domain_id = win.time_domain_id,
@@ -3684,7 +3684,7 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
         {
             var name_buf: [64]u8 = undefined;
             const pname = std.fmt.bufPrintSentinel(&name_buf, "cmd_pool[{}]", .{f}, 0) catch "cmd_pool";
-            self.setDebugName(.command_pool, @intFromEnum(pool), pname);
+            self.setDebugName(.command_pool, @backingInt(pool), pname);
         }
         win.cmd_pools.appendAssumeCapacity(pool);
 
@@ -3697,7 +3697,7 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
         {
             var name_buf: [64]u8 = undefined;
             const cname = std.fmt.bufPrintSentinel(&name_buf, "cmd_buf[{}]", .{f}, 0) catch "cmd_buf";
-            self.setDebugName(.command_buffer, @intFromEnum(cb_handle), cname);
+            self.setDebugName(.command_buffer, @backingInt(cb_handle), cname);
         }
         win.cmd_buffers.appendAssumeCapacity(.{ .handle = cb_handle, .wrapper = &self.vkd });
 
@@ -3705,7 +3705,7 @@ fn createPerFrameResources(self: *VkBackend, win: *Window) !void {
         {
             var name_buf: [64]u8 = undefined;
             const fname = std.fmt.bufPrintSentinel(&name_buf, "cmd_fence[{}]", .{f}, 0) catch "cmd_fence";
-            self.setDebugName(.fence, @intFromEnum(fence), fname);
+            self.setDebugName(.fence, @backingInt(fence), fname);
         }
         win.cmd_pool_ready.appendAssumeCapacity(fence);
     }
@@ -3749,7 +3749,7 @@ fn createPresentSemaphores(self: *VkBackend, win: *Window) !void {
         for (win.images.items, 0..) |_, i| {
             const sem = try self.device.createSemaphore(&.{}, null);
             const sname = std.fmt.bufPrintSentinel(&name_buf, "present_sem[{}]", .{i}, 0) catch "present_sem";
-            self.setDebugName(.semaphore, @intFromEnum(sem), sname);
+            self.setDebugName(.semaphore, @backingInt(sem), sname);
             win.present_sems.appendAssumeCapacity(sem);
         }
     }
@@ -3963,12 +3963,12 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
             .{self.textures.items.len + 1},
             0,
         ) catch "tex_img";
-        self.setDebugName(.image, @intFromEnum(image), iname);
+        self.setDebugName(.image, @backingInt(image), iname);
     }
 
     const owned_memory = storage.vk_buffer == 0;
     const image_memory: vk.DeviceMemory = if (!owned_memory) blk: {
-        const target_buf: vk.Buffer = @enumFromInt(storage.vk_buffer);
+        const target_buf: vk.Buffer = @fromBackingInt(@intCast(storage.vk_buffer));
         break :blk for (self.allocs.items) |a| {
             if (a.buf == target_buf) break a.memory;
         } else return error.OutOfMemory;
@@ -4066,7 +4066,7 @@ pub fn textureCreate(self: *VkBackend, desc: TextureDesc, storage: GpuPtr, queue
             .{self.textures.items.len + 1},
             0,
         ) catch "tex_view";
-        self.setDebugName(.image_view, @intFromEnum(default_view), vname);
+        self.setDebugName(.image_view, @backingInt(default_view), vname);
     }
 
     try self.textures.append(self.allocator, .{
@@ -4169,7 +4169,7 @@ pub fn textureViewDescriptor(self: *VkBackend, tex: TextureHandle, view_desc: Te
 
     // Hash the view desc fields (lower 32 bits) + texture id (upper 32 bits)
     var h = std.hash.Wyhash.init(0);
-    h.update(&[_]u8{ @intFromEnum(view_desc.type), @intFromEnum(view_desc.format), view_desc.mip_count });
+    h.update(&[_]u8{ @backingInt(view_desc.type), @backingInt(view_desc.format), view_desc.mip_count });
     h.update(std.mem.asBytes(&view_desc.base_mip));
     h.update(std.mem.asBytes(&view_desc.base_layer));
     h.update(std.mem.asBytes(&view_desc.layer_count));
@@ -4178,7 +4178,7 @@ pub fn textureViewDescriptor(self: *VkBackend, tex: TextureHandle, view_desc: Te
 
     // Cache hit — return existing view
     if (self.texture_view_cache.get(cache_key)) |cached_view| {
-        return @intFromEnum(cached_view);
+        return @backingInt(cached_view);
     }
 
     // Cache miss — create new view
@@ -4204,7 +4204,7 @@ pub fn textureViewDescriptor(self: *VkBackend, tex: TextureHandle, view_desc: Te
         self.device.destroyImageView(v, null);
         return 0;
     };
-    return @intFromEnum(v);
+    return @backingInt(v);
 }
 pub fn textureRwViewDescriptor(self: *VkBackend, tex: TextureHandle, view_desc: TextureViewDesc) u64 {
     return self.textureViewDescriptor(tex, view_desc);
@@ -4213,8 +4213,8 @@ pub fn samplerDescriptor(self: *VkBackend, desc: SamplerDesc) u64 {
     // Hash the sampler desc fields for cache lookup
     var h = std.hash.Wyhash.init(0);
     h.update(&[_]u8{
-        @intFromEnum(desc.min_filter),     @intFromEnum(desc.mag_filter),     @intFromEnum(desc.mip_filter),
-        @intFromEnum(desc.address_mode_u), @intFromEnum(desc.address_mode_v), @intFromEnum(desc.address_mode_w),
+        @backingInt(desc.min_filter),     @backingInt(desc.mag_filter),     @backingInt(desc.mip_filter),
+        @backingInt(desc.address_mode_u), @backingInt(desc.address_mode_v), @backingInt(desc.address_mode_w),
     });
     h.update(std.mem.asBytes(&desc.mip_lod_bias));
     h.update(std.mem.asBytes(&desc.min_lod));
@@ -4224,7 +4224,7 @@ pub fn samplerDescriptor(self: *VkBackend, desc: SamplerDesc) u64 {
 
     // Cache hit — return existing sampler
     if (self.sampler_cache.get(cache_key)) |cached_sampler| {
-        return @intFromEnum(cached_sampler);
+        return @backingInt(cached_sampler);
     }
 
     // Cache miss — create new sampler
@@ -4238,19 +4238,19 @@ pub fn samplerDescriptor(self: *VkBackend, desc: SamplerDesc) u64 {
         .mip_lod_bias = desc.mip_lod_bias,
         .anisotropy_enable = if (desc.max_anisotropy > 0) @as(vk.Bool32, .true) else .false,
         .max_anisotropy = desc.max_anisotropy,
-        .compare_enable = @as(vk.Bool32, @enumFromInt(0)),
+        .compare_enable = @as(vk.Bool32, @fromBackingInt(@intCast(0))),
         .compare_op = .never,
         .min_lod = desc.min_lod,
         .max_lod = desc.max_lod,
         .border_color = .float_transparent_black,
-        .unnormalized_coordinates = @as(vk.Bool32, @enumFromInt(0)),
+        .unnormalized_coordinates = @as(vk.Bool32, @fromBackingInt(@intCast(0))),
     };
     const s = self.device.createSampler(&sampler_info, null) catch return 0;
     self.sampler_cache.put(cache_key, s) catch {
         self.device.destroySampler(s, null);
         return 0;
     };
-    return @intFromEnum(s);
+    return @backingInt(s);
 }
 
 // Descriptor heap methods
@@ -4280,11 +4280,11 @@ pub fn descHeapCreate(self: *VkBackend, texture_count: u32, texture_rw_count: u3
     {
         var name_buf: [64]u8 = undefined;
         const pname = std.fmt.bufPrintSentinel(&name_buf, "desc_pool[{}]", .{idx}, 0) catch "desc_pool";
-        self.setDebugName(.descriptor_pool, @intFromEnum(pool), pname);
+        self.setDebugName(.descriptor_pool, @backingInt(pool), pname);
         const set_labels = [_][]const u8{ "tex", "tex_rw", "samp" };
         for (&sets, set_labels) |*s, label| {
             const sn = std.fmt.bufPrintSentinel(&name_buf, "desc_set_{s}[{}]", .{ label, idx }, 0) catch "desc_set";
-            self.setDebugName(.descriptor_set, @intFromEnum(s.*), sn);
+            self.setDebugName(.descriptor_set, @backingInt(s.*), sn);
         }
     }
     try self.desc_heaps.append(self.allocator, .{ .pool = pool, .sets = sets });
@@ -4312,7 +4312,7 @@ pub fn descHeapSetTextures(self: *VkBackend, heap_idx: u32, start_idx: u32, desc
     defer self.allocator.free(buf);
     for (descriptors, 0..) |desc, i| {
         buf[i] = .{
-            .image_view = @enumFromInt(desc),
+            .image_view = @fromBackingInt(@intCast(desc)),
             .image_layout = .general,
             .sampler = .null_handle,
         };
@@ -4336,7 +4336,7 @@ pub fn descHeapSetTexturesRw(self: *VkBackend, heap_idx: u32, start_idx: u32, de
     defer self.allocator.free(buf);
     for (descriptors, 0..) |desc, i| {
         buf[i] = .{
-            .image_view = @enumFromInt(desc),
+            .image_view = @fromBackingInt(@intCast(desc)),
             .image_layout = .general,
             .sampler = .null_handle,
         };
@@ -4360,7 +4360,7 @@ pub fn descHeapSetSamplers(self: *VkBackend, heap_idx: u32, start_idx: u32, desc
     defer self.allocator.free(buf);
     for (descriptors, 0..) |desc, i| {
         buf[i] = .{
-            .sampler = @enumFromInt(desc),
+            .sampler = @fromBackingInt(@intCast(desc)),
             .image_view = .null_handle,
             .image_layout = .undefined,
         };
@@ -4574,7 +4574,7 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
             .{ mem_label, self.allocs.items.len },
             0,
         ) catch "buf";
-        self.setDebugName(.buffer, @intFromEnum(buf), bname);
+        self.setDebugName(.buffer, @backingInt(buf), bname);
     }
 
     const mem_reqs = self.device.getBufferMemoryRequirements(buf);
@@ -4619,12 +4619,12 @@ pub fn gpuMalloc(self: *VkBackend, size: u64, alignment: u29, mem_type: MemoryTy
     return .{
         .cpu = if (cpu) |c| c else @ptrCast(@constCast(&[0]u8{})),
         .gpu = gpu_addr,
-        .vk_buffer = @intFromEnum(buf),
+        .vk_buffer = @backingInt(buf),
     };
 }
 
 pub fn gpuFree(self: *VkBackend, ptr: GpuPtr) void {
-    const target: vk.Buffer = @enumFromInt(ptr.vk_buffer);
+    const target: vk.Buffer = @fromBackingInt(@intCast(ptr.vk_buffer));
     for (self.allocs.items, 0..) |info, i| {
         if (info.buf == target) {
             self.pending_free.append(self.allocator, .{ .buffer = .{
@@ -4677,7 +4677,7 @@ pub fn cmdSetVertexInput(
         vk_bindings[i] = .{
             .binding = b.binding,
             .stride = b.stride,
-            .input_rate = @enumFromInt(b.input_rate),
+            .input_rate = @fromBackingInt(@intCast(b.input_rate)),
             .divisor = 1,
         };
     }
@@ -4685,7 +4685,7 @@ pub fn cmdSetVertexInput(
         vk_attribs[i] = .{
             .location = a.location,
             .binding = a.binding,
-            .format = @enumFromInt(a.format),
+            .format = @fromBackingInt(@intCast(a.format)),
             .offset = a.offset,
         };
     }

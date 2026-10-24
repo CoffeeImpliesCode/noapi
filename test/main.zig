@@ -68,15 +68,15 @@ pub fn main(init: std.process.Init) !void {
     defer gpu.deinit();
 
     // ── Windows + surfaces
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
+    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@backingInt(gpu.instanceHandle())), null);
+    const surface: vk.SurfaceKHR = @fromBackingInt(@intCast(@intFromPtr(sdl_surface.surface)));
     var surf1 = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 800, .height = 600 } });
     try presentTimingCapabilitySmoke(&surf1);
 
     const sdl_win2 = try sdl3.video.Window.init("noapi-2", 400, 300, .{ .resizable = true });
     try sdl_win2.show();
-    const sdl_surface2 = try sdl3.vulkan.Surface.init(sdl_win2, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface2: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface2.surface));
+    const sdl_surface2 = try sdl3.vulkan.Surface.init(sdl_win2, @ptrFromInt(@backingInt(gpu.instanceHandle())), null);
+    const surface2: vk.SurfaceKHR = @fromBackingInt(@intCast(@intFromPtr(sdl_surface2.surface)));
     var surf2 = try noapi.Surface.init(&gpu, surface2, .{ .extent = .{ .width = 400, .height = 300 } });
 
     const win1_id = try sdl_win.getId();
@@ -332,8 +332,8 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
             cmd.setVertexInput(
                 &.{.{ .binding = 0, .stride = s.vertex_size, .input_rate = 0 }},
                 &.{
-                    .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = 0 },
-                    .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32b32_sfloat), .offset = 8 },
+                    .{ .location = 0, .binding = 0, .format = @backingInt(vk.Format.r32g32_sfloat), .offset = 0 },
+                    .{ .location = 1, .binding = 0, .format = @backingInt(vk.Format.r32g32b32_sfloat), .offset = 8 },
                 },
             );
             cmd.bindVertexBuffer(0, s.vert_buf, 0);
@@ -363,8 +363,8 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
             cmd.setVertexInput(
                 &.{.{ .binding = 0, .stride = s.vertex_size, .input_rate = 0 }},
                 &.{
-                    .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = 0 },
-                    .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32b32_sfloat), .offset = 8 },
+                    .{ .location = 0, .binding = 0, .format = @backingInt(vk.Format.r32g32_sfloat), .offset = 0 },
+                    .{ .location = 1, .binding = 0, .format = @backingInt(vk.Format.r32g32b32_sfloat), .offset = 8 },
                 },
             );
             cmd.bindVertexBuffer(0, s.vert_buf, 0);
@@ -507,9 +507,9 @@ fn window2(win: *noapi.Surface, s: *SharedW2) void {
 fn submissionLifecycleTest(init: std.process.Init, submission_count: u32) !void {
     if (submission_count == 0) return error.InvalidSubmissionCount;
 
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer {
-        if (debug_allocator.deinit() != .ok) @panic("submission lifecycle allocator leak");
+        if (debug_allocator.deinit() != 0) @panic("submission lifecycle allocator leak");
     }
     const allocator = debug_allocator.allocator();
     const io = init.io;
@@ -551,7 +551,7 @@ fn submissionLifecycleTest(init: std.process.Init, submission_count: u32) !void 
         null;
     defer if (timestamp_set) |set| gpu.timestampQuerySetDestroy(set);
 
-    var slot_values = [_]u64{0} ** 3;
+    var slot_values: [3]u64 = @splat(0);
     var wrote_timestamps = false;
     var signal_value: u64 = 1;
     while (signal_value <= submission_count) : (signal_value += 1) {
@@ -605,9 +605,9 @@ fn presentTimingCapabilitySmoke(surface: *noapi.Surface) !void {
 }
 
 fn presentationFeedbackTest(init: std.process.Init, requested_mode: []const u8) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer {
-        if (debug_allocator.deinit() != .ok) @panic("presentation feedback allocator leak");
+        if (debug_allocator.deinit() != 0) @panic("presentation feedback allocator leak");
     }
     const allocator = debug_allocator.allocator();
     const io = init.io;
@@ -647,10 +647,10 @@ fn presentationFeedbackTest(init: std.process.Init, requested_mode: []const u8) 
 
     const sdl_surface = try sdl3.vulkan.Surface.init(
         sdl_window,
-        @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
+        @ptrFromInt(@backingInt(gpu.instanceHandle())),
         null,
     );
-    const vk_surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
+    const vk_surface: vk.SurfaceKHR = @fromBackingInt(@intCast(@intFromPtr(sdl_surface.surface)));
     var surface = try noapi.Surface.init(
         &gpu,
         vk_surface,
@@ -829,7 +829,7 @@ fn presentationFeedbackTest(init: std.process.Init, requested_mode: []const u8) 
                     pair_number,
                     total_pairs,
                     stage_bit,
-                    @intFromEnum(saved_domains[domain_index]),
+                    @backingInt(saved_domains[domain_index]),
                     saved_domain_ids[domain_index],
                 },
             );

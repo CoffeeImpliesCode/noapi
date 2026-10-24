@@ -36,8 +36,12 @@ rec {
     VULKAN_SDK = "${pkgs.vulkan-headers.out}";
   };
 
-  # https://devenv.sh/languages/
-  # languages.zig.enable = true;
+  enterShell = ''
+    if [ "$(zig version)" != "0.17.0" ]; then
+      echo "noapi requires Zig 0.17.0 on PATH" >&2
+      return 1
+    fi
+  '';
 
   scripts.gate.exec = "zig-gate";
 }

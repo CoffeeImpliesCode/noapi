@@ -157,10 +157,10 @@ pub const App = struct {
         // Surface — pass gpu directly (already a stable heap pointer)
         const sdl_surface = try sdl3.vulkan.Surface.init(
             win.?,
-            @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
+            @ptrFromInt(@backingInt(gpu.instanceHandle())),
             null,
         );
-        const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
+        const surface: vk.SurfaceKHR = @fromBackingInt(@intCast(@intFromPtr(sdl_surface.surface)));
         const surf = try noapi.Surface.init(gpu, surface, .{
             .extent = .{ .width = width, .height = height },
         });
