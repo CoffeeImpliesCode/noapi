@@ -69,7 +69,7 @@ initialization and `examples/1_triangle/main.zig` for command recording and rend
 
 ## Shaders
 
-SPIR-V and `env.ppm` are runtime assets. Shader compilers are only needed when
+SPIR-V and `sky.ppm` are runtime assets. Shader compilers are only needed when
 changing shader sources. For GLSL, select the stage from the source extension:
 
 ```sh
@@ -80,6 +80,9 @@ Slang sources use `slangc`; their entry points are declared in the source. Match
 the output filename to the application's shader path. Keep generated SPIR-V with
 its source when changing a runtime shader.
 
+Run `python3 tools/gen_sky.py` to regenerate `shaders/sky.ppm`.
+The script creates an original sky and ground gradient without external assets.
+
 ## Layout
 
 - `noapi/`: public API, Vulkan backend, and generated Vulkan bindings.
@@ -89,4 +92,4 @@ its source when changing a runtime shader.
 
 ## License
 
-No license is specified in this repository.
+MIT, see [LICENSE](LICENSE). Third-party components keep their own licenses: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
